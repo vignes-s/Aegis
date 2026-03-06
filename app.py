@@ -1,1387 +1,1183 @@
+# =============================================================================
+#  AEGIS OS — EV Fleet Intelligence & Security Platform
+#  Single-file Streamlit app | Python 3.10+ | Streamlit 1.30+
+#  v3.3.0 — Fixed mediapipe API, Neural Core import, + Map Assistant terminal
+# =============================================================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import random
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+import random
+import time
+import datetime
+import hashlib
+import base64
+import io
+import warnings
+warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────
-#  PAGE CONFIG
-# ─────────────────────────────────────────────
+# ── Optional heavy deps with graceful fallback ──────────────────────────────
+CV2_AVAILABLE   = False
+MP_AVAILABLE    = False
+MP_LEGACY_API   = False   # True only if mp.solutions.hands exists (mediapipe <=0.10.3)
+SR_AVAILABLE    = False
+GTTS_AVAILABLE  = False
+SCIPY_AVAILABLE = False
+
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    import mediapipe as mp
+    MP_AVAILABLE = True
+    try:
+        _ = mp.solutions.hands   # works on mediapipe <= 0.10.3
+        MP_LEGACY_API = True
+    except AttributeError:
+        MP_LEGACY_API = False    # mediapipe 0.10.4+ dropped mp.solutions.*
+except ImportError:
+    pass
+
+try:
+    import speech_recognition as sr
+    SR_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    from scipy import stats
+    from scipy.signal import savgol_filter
+    SCIPY_AVAILABLE = True
+except ImportError:
+    pass
+
+# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Aegis · EV Intelligence",
+    page_title="AEGIS OS",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────
-#  APPLE-INSPIRED CSS
-# ─────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@300;400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+# =============================================================================
+#  CLASS: AegisUI
+# =============================================================================
+class AegisUI:
+    CYAN   = "#00d2ff"
+    PINK   = "#ff00c1"
+    CARD   = "rgba(15,15,30,0.75)"
+    BORDER = "rgba(0,210,255,0.25)"
 
-:root {
-    --bg:      #F2F2F7;
-    --bg2:     #FFFFFF;
-    --bg3:     #E5E5EA;
-    --surface: rgba(255,255,255,0.82);
-    --border:  rgba(0,0,0,0.08);
-    --text:    #1C1C1E;
-    --text2:   #3A3A3C;
-    --text3:   #8E8E93;
-    --blue:    #007AFF;
-    --green:   #34C759;
-    --orange:  #FF9500;
-    --red:     #FF3B30;
-    --shadow:  0 2px 20px rgba(0,0,0,0.07);
-    --shadow-md: 0 8px 40px rgba(0,0,0,0.11);
-    --radius:  16px;
-    --radius-sm: 10px;
-    --radius-lg: 24px;
-}
-
-html, body, [class*="css"] {
-    background-color: var(--bg) !important;
-    color: var(--text) !important;
-    font-family: 'Nunito', -apple-system, BlinkMacSystemFont, sans-serif !important;
-    -webkit-font-smoothing: antialiased;
-}
-.stApp { background: var(--bg) !important; }
-
-[data-testid="stSidebar"] {
-    background: rgba(242,242,247,0.97) !important;
-    border-right: 1px solid var(--border) !important;
-}
-[data-testid="stSidebar"] * { color: var(--text2) !important; }
-
-.block-container { padding: 1.5rem 2rem 2rem 2rem !important; max-width: 1400px; }
-
-[data-testid="metric-container"] {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: var(--radius) !important;
-    padding: 18px 20px !important;
-    box-shadow: var(--shadow) !important;
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-[data-testid="metric-container"]:hover { transform: translateY(-2px); box-shadow: var(--shadow-md) !important; }
-[data-testid="stMetricValue"] { font-family: 'Nunito',sans-serif !important; font-weight: 800 !important; font-size: 1.9rem !important; color: var(--text) !important; }
-[data-testid="stMetricLabel"] { font-size: 0.72rem !important; font-weight: 600 !important; color: var(--text3) !important; text-transform: uppercase !important; letter-spacing: 0.06em !important; }
-
-h1 { font-family: 'Nunito',sans-serif !important; font-weight: 800 !important; color: var(--text) !important; font-size: 1.9rem !important; }
-h2 { font-family: 'Nunito',sans-serif !important; font-weight: 700 !important; color: var(--text) !important; font-size: 1.2rem !important; }
-h3 { font-family: 'Nunito',sans-serif !important; font-weight: 600 !important; color: var(--text2) !important; }
-
-.stButton > button {
-    background: var(--blue) !important; color: white !important; border: none !important;
-    border-radius: 12px !important; font-family: 'Nunito',sans-serif !important; font-weight: 600 !important;
-    font-size: 0.85rem !important; padding: 10px 20px !important; transition: all 0.2s !important;
-    box-shadow: 0 2px 8px rgba(0,122,255,0.25) !important;
-}
-.stButton > button:hover { background: #0066DD !important; transform: translateY(-1px) !important; box-shadow: 0 4px 16px rgba(0,122,255,0.35) !important; }
-
-.stSuccess { background: rgba(52,199,89,0.1) !important; border: 1px solid rgba(52,199,89,0.3) !important; border-radius: var(--radius-sm) !important; }
-.stWarning { background: rgba(255,149,0,0.1) !important; border: 1px solid rgba(255,149,0,0.3) !important; border-radius: var(--radius-sm) !important; }
-.stError   { background: rgba(255,59,48,0.1) !important; border: 1px solid rgba(255,59,48,0.3) !important; border-radius: var(--radius-sm) !important; }
-.stInfo    { background: rgba(0,122,255,0.08) !important; border: 1px solid rgba(0,122,255,0.2) !important; border-radius: var(--radius-sm) !important; }
-
-.stSelectbox > div > div, .stTextInput > div > div > input {
-    background: var(--bg2) !important; border: 1px solid var(--border) !important;
-    border-radius: var(--radius-sm) !important; color: var(--text) !important;
-    font-family: 'Nunito',sans-serif !important;
-}
-
-.stTabs [data-baseweb="tab-list"] {
-    background: var(--bg3) !important; border-radius: 12px !important; padding: 4px !important; gap: 2px !important; border: none !important;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent !important; border-radius: 10px !important; color: var(--text3) !important;
-    font-weight: 600 !important; font-size: 0.82rem !important; padding: 8px 16px !important;
-    border: none !important; transition: all 0.2s !important;
-}
-.stTabs [aria-selected="true"] { background: var(--bg2) !important; color: var(--text) !important; box-shadow: 0 1px 8px rgba(0,0,0,0.12) !important; }
-
-[data-testid="stDataFrame"] { border: 1px solid var(--border) !important; border-radius: var(--radius) !important; box-shadow: var(--shadow) !important; }
-
-hr { border: none !important; border-top: 1px solid var(--border) !important; margin: 24px 0 !important; }
-.stCheckbox label { color: var(--text2) !important; font-size: 0.85rem !important; }
-
-/* ── Apple Cards ── */
-.apple-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 20px 24px; margin: 8px 0; box-shadow: var(--shadow);
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-.apple-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
-.apple-card-sm {
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: 12px 16px; margin: 5px 0; box-shadow: var(--shadow);
-}
-.status-pill {
-    display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 20px;
-    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-}
-.pill-green  { background: rgba(52,199,89,0.12);  color: #1A7A33; border: 1px solid rgba(52,199,89,0.3); }
-.pill-orange { background: rgba(255,149,0,0.12);  color: #7A4A00; border: 1px solid rgba(255,149,0,0.3); }
-.pill-red    { background: rgba(255,59,48,0.12);  color: #8A1A14; border: 1px solid rgba(255,59,48,0.3); }
-.pill-dark   { background: rgba(255,59,48,0.2);   color: #5A0A08; border: 1px solid rgba(255,59,48,0.5); animation: blink 1.2s ease-in-out infinite; }
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.5} }
-
-/* ── Hero ── */
-.hero-wrap {
-    background: linear-gradient(145deg, #FFFFFF 0%, #F2F2F7 100%);
-    border: 1px solid var(--border); border-radius: var(--radius-lg);
-    padding: 32px 40px; margin-bottom: 24px; box-shadow: var(--shadow-md);
-    position: relative; overflow: hidden;
-}
-.hero-wrap::before {
-    content:''; position:absolute; top:-60px; right:-60px;
-    width:220px; height:220px;
-    background: radial-gradient(circle, rgba(0,122,255,0.08) 0%, transparent 70%);
-    border-radius:50%; pointer-events:none;
-}
-.brand-name { font-family:'Nunito',sans-serif; font-weight:800; font-size:2.2rem; color:#1C1C1E; letter-spacing:-0.02em; }
-.brand-name span { color:#007AFF; }
-.brand-tag  { font-size:0.75rem; font-weight:600; color:#8E8E93; letter-spacing:0.12em; text-transform:uppercase; margin-top:4px; }
-.live-badge {
-    display:inline-flex; align-items:center; gap:6px;
-    background:rgba(52,199,89,0.1); border:1px solid rgba(52,199,89,0.3);
-    border-radius:20px; padding:5px 12px; font-size:0.72rem; font-weight:700; color:#1A7A33;
-}
-.live-dot { width:7px; height:7px; background:#34C759; border-radius:50%; animation:livepulse 1.8s ease-in-out infinite; box-shadow:0 0 6px rgba(52,199,89,0.6); }
-@keyframes livepulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.6;transform:scale(0.8)} }
-
-.section-title { font-family:'Nunito',sans-serif; font-weight:800; font-size:1.15rem; color:#1C1C1E; margin:0 0 4px 0; }
-.section-sub   { font-size:0.78rem; color:#8E8E93; margin:0 0 16px 0; }
-
-.progress-bar-wrap { background:#E5E5EA; border-radius:6px; height:7px; overflow:hidden; margin:4px 0; }
-.progress-bar-fill { height:7px; border-radius:6px; transition:width 0.6s cubic-bezier(0.4,0,0.2,1); }
-
-.chat-user {
-    background:#007AFF; color:white; border-radius:18px 18px 4px 18px;
-    padding:10px 16px; margin:6px 0; max-width:72%;
-    font-size:0.88rem; line-height:1.4; box-shadow:0 2px 8px rgba(0,122,255,0.2);
-}
-.chat-ai {
-    background:white; color:#1C1C1E; border:1px solid var(--border);
-    border-radius:18px 18px 18px 4px; padding:10px 16px; margin:6px 0; max-width:78%;
-    font-size:0.88rem; line-height:1.4; box-shadow:var(--shadow);
-}
-.log-entry {
-    font-family:'DM Mono',monospace; font-size:0.73rem; color:#8E8E93;
-    background:rgba(0,0,0,0.03); border-left:3px solid #E5E5EA;
-    padding:5px 10px; margin:3px 0; border-radius:0 6px 6px 0;
-}
-
-/* ── Aegis AI head SVG icon ── */
-.aegis-ai-head {
-    width:38px; height:38px; border-radius:50%;
-    background: radial-gradient(circle at 35% 35%, #5AC8FA, #007AFF 60%, #0040AA);
-    box-shadow: 0 0 0 4px rgba(0,122,255,0.15), 0 2px 10px rgba(0,122,255,0.3);
-    display:flex; align-items:center; justify-content:center;
-    animation: robopulse 2.5s ease-in-out infinite;
-    flex-shrink:0;
-}
-@keyframes robopulse {
-    0%,100%{box-shadow:0 0 0 4px rgba(0,122,255,0.15),0 2px 10px rgba(0,122,255,0.3);}
-    50%{box-shadow:0 0 0 9px rgba(0,122,255,0.2),0 2px 18px rgba(0,122,255,0.45);}
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-#  PLOTLY HELPER
-# ─────────────────────────────────────────────
-PLOT_BG = "rgba(0,0,0,0)"
-PAPER_BG = "rgba(255,255,255,0)"
-GRID_COLOR = "#F2F2F7"
-TICK_COLOR = "#8E8E93"
-FONT = "Nunito, sans-serif"
-
-def apple_layout(fig, height=300, title=""):
-    fig.update_layout(
-        title=dict(text=title, font=dict(family=FONT,size=14,color="#1C1C1E"), x=0, xanchor="left") if title else None,
-        plot_bgcolor=PLOT_BG, paper_bgcolor=PAPER_BG,
-        font=dict(family=FONT, color=TICK_COLOR),
-        height=height, margin=dict(t=44 if title else 20, b=20, l=10, r=10),
-        legend=dict(bgcolor="rgba(255,255,255,0.85)", bordercolor="#E5E5EA", borderwidth=1, font=dict(size=11)),
-    )
-    fig.update_xaxes(showgrid=False, color=TICK_COLOR, linecolor="#E5E5EA", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor=GRID_COLOR, color=TICK_COLOR, linecolor="#E5E5EA", zeroline=False)
-    return fig
-
-# ─────────────────────────────────────────────
-#  DATA & LOGIC
-# ─────────────────────────────────────────────
-DRIVER_NAMES  = ["Arjun Sharma","Priya Nair","Ravi Kumar","Sneha Pillai","Vikram Reddy",
-                 "Ananya Iyer","Siddharth Rao","Kavya Menon","Aditya Joshi","Meera Krishnan"]
-VEHICLE_MODELS= ["BYD Atto 3","Tata Nexon EV","MG ZS EV","Ola S1 Pro","Ather 450X",
-                 "Tata Tigor EV","Hyundai Kona","Kia EV6","BMW iX","Tesla Model 3"]
-
-def generate_vehicle_data(n=10):
-    data = []
-    for i in range(n):
-        data.append({
-            "vehicle_id":        f"EV-{str(i+1).zfill(3)}",
-            "model":             VEHICLE_MODELS[i % len(VEHICLE_MODELS)],
-            "driver":            DRIVER_NAMES[i % len(DRIVER_NAMES)],
-            "speed":             int(np.clip(np.random.normal(65,25),0,130)),
-            "battery":           int(np.clip(np.random.normal(55,25),5,100)),
-            "soc_degradation":   round(random.uniform(0,15),1),
-            "brake_temp":        int(np.clip(np.random.normal(160,40),80,260)),
-            "motor_temp":        int(np.clip(np.random.normal(80,20),40,130)),
-            "regen_efficiency":  round(random.uniform(0.1,0.95),2),
-            "tire_pressure":     round(random.uniform(28,38),1),
-            "cabin_temp":        round(random.uniform(18,35),1),
-            "vibration":         round(random.uniform(0.1,2.5),2),
-            "mileage":           random.randint(5000,95000),
-            "last_service_days": random.randint(0,180),
-            "trips_today":       random.randint(1,12),
-            "harsh_braking":     random.randint(0,8),
-            "rapid_accel":       random.randint(0,6),
-            "overspeed_events":  random.randint(0,5),
-            "network_status":    random.choices([1,0],weights=[0.85,0.15])[0],
-            "gps_status":        random.choices([1,0],weights=[0.92,0.08])[0],
-        })
-    return pd.DataFrame(data)
-
-def detect_faults(row):
-    f=[]
-    if row["battery"]<15:           f.append("⚡ Critical Low Battery")
-    elif row["battery"]<25:         f.append("⚡ Low Battery")
-    if row["brake_temp"]>220:       f.append("🔥 Critical Brake Overheat")
-    elif row["brake_temp"]>195:     f.append("🌡 Brake Overheat")
-    if row["motor_temp"]>110:       f.append("🔥 Critical Motor Overheat")
-    elif row["motor_temp"]>95:      f.append("🌡 Motor Overheat")
-    if row["speed"]>110:            f.append("🚨 Dangerous Overspeed")
-    elif row["speed"]>95:           f.append("⚠️ Overspeed")
-    if row["network_status"]==0:    f.append("📡 Network Failure")
-    if row["gps_status"]==0:        f.append("🛰 GPS Signal Lost")
-    if row["regen_efficiency"]<0.2: f.append("🔋 Regen Brake Issue")
-    if row["tire_pressure"]<30:     f.append("🔘 Low Tire Pressure")
-    if row["vibration"]>2.0:        f.append("📳 Abnormal Vibration")
-    if row["last_service_days"]>150:f.append("🔧 Overdue Service")
-    if row["soc_degradation"]>12:   f.append("🔋 Battery Degradation")
-    return f
-
-def calculate_safety_score(row):
-    mech=100.;elec=100.;digi=100.;therm=100.;drv=100.
-    if row["brake_temp"]>220:       mech-=35
-    elif row["brake_temp"]>195:     mech-=18
-    if row["speed"]>110:            mech-=20
-    elif row["speed"]>95:           mech-=10
-    if row["vibration"]>2.0:        mech-=15
-    if row["tire_pressure"]<30:     mech-=10
-    if row["battery"]<15:           elec-=45
-    elif row["battery"]<25:         elec-=25
-    if row["regen_efficiency"]<0.2: elec-=15
-    if row["soc_degradation"]>12:   elec-=10
-    if row["network_status"]==0:    digi-=40
-    if row["gps_status"]==0:        digi-=30
-    if row["motor_temp"]>110:       therm-=40
-    elif row["motor_temp"]>95:      therm-=20
-    if row["cabin_temp"]>32:        therm-=5
-    drv-=min(row["harsh_braking"]*5,30)
-    drv-=min(row["rapid_accel"]*4,20)
-    drv-=min(row["overspeed_events"]*6,30)
-    mech=max(mech,0);elec=max(elec,0);digi=max(digi,0);therm=max(therm,0);drv=max(drv,0)
-    overall=0.25*mech+0.25*elec+0.15*digi+0.20*therm+0.15*drv
-    return mech,elec,digi,therm,drv,round(overall,1)
-
-def classify_safety(s):
-    if s>=82: return "Healthy"
-    elif s>=63: return "At Risk"
-    elif s>=42: return "Critical"
-    return "Emergency"
-
-def driver_score(row):
-    b=100-min(row["harsh_braking"]*6,36)-min(row["rapid_accel"]*5,25)-min(row["overspeed_events"]*7,35)
-    return max(b,0)
-
-def predict_failure_prob(row):
-    r=0.
-    r+=max(0,(100-row["battery"])/100)*0.2
-    r+=max(0,(row["brake_temp"]-150)/110)*0.25
-    r+=max(0,(row["motor_temp"]-70)/60)*0.2
-    r+=(1-row["regen_efficiency"])*0.1
-    r+=max(0,row["soc_degradation"]/15)*0.1
-    r+=(1-row["network_status"])*0.1
-    r+=max(0,(row["vibration"]-1.0)/1.5)*0.05
-    return round(min(r,1.0)*100,1)
-
-def maintenance_window(p):
-    if p>70: return "< 48 hrs"
-    elif p>45: return "3–7 days"
-    elif p>25: return "2–4 weeks"
-    return "> 1 month"
-
-def generate_recs(faults):
-    MAP={
-        "Critical Low Battery":    "⚡ URGENT: Route to charging station now",
-        "Low Battery":             "⚡ Schedule charging within 20 km",
-        "Critical Brake Overheat": "🔥 STOP: Brake inspection required immediately",
-        "Brake Overheat":          "🌡 Reduce braking intensity; inspect pads",
-        "Critical Motor Overheat": "🔥 Reduce load, allow cooling",
-        "Motor Overheat":          "🌡 Check motor cooling system",
-        "Dangerous Overspeed":     "🚨 Alert driver; apply speed limiter",
-        "Overspeed":               "⚠️ Issue speed warning to driver",
-        "Network Failure":         "📡 Diagnose V2X communication module",
-        "GPS Signal Lost":         "🛰 Switch to DR navigation; check antenna",
-        "Regen Brake Issue":       "🔋 Calibrate regenerative braking system",
-        "Low Tire Pressure":       "🔘 Inflate to 32–35 PSI",
-        "Abnormal Vibration":      "📳 Check wheel balance & suspension",
-        "Overdue Service":         "🔧 Schedule preventive maintenance",
-        "Battery Degradation":     "🔋 Battery health check required",
-    }
-    recs=[]
-    for fault in faults:
-        clean=fault.split(" ",1)[1] if len(fault)>0 and not fault[0].isalpha() else fault
-        for k,v in MAP.items():
-            if k.lower() in clean.lower():
-                recs.append(v); break
-    return recs
-
-def fleet_ai_response(query, df):
-    q=query.lower()
-    if any(w in q for w in ["how many","count","total"]):
-        if "critical" in q or "emergency" in q:
-            n=len(df[df["status"].isin(["Critical","Emergency"])])
-            return f"🔴 **{n}** vehicles are in Critical or Emergency status."
-        if "healthy" in q: return f"✅ **{len(df[df['status']=='Healthy'])}** vehicles are Healthy."
-        return f"📊 Fleet has **{len(df)}** total vehicles."
-    if any(w in q for w in ["worst","dangerous","most risk","lowest"]):
-        w=df.loc[df["safety_index"].idxmin()]
-        return f"⚠️ **{w['vehicle_id']}** ({w['model']}) has the lowest score: **{w['safety_index']}** — driven by {w['driver']}."
-    if any(w in q for w in ["best","safest","highest"]):
-        b=df.loc[df["safety_index"].idxmax()]
-        return f"✅ **{b['vehicle_id']}** ({b['model']}) is safest: **{b['safety_index']}** — driven by {b['driver']}."
-    if "battery" in q:
-        low=df[df["battery"]<25]
-        if len(low): return f"⚡ **{len(low)}** vehicles have low battery: {', '.join(low['vehicle_id'].tolist())}."
-        return "⚡ All vehicles have adequate battery (>25%)."
-    if any(w in q for w in ["driver","behavior","score"]):
-        df2=df.copy(); df2["ds"]=df2.apply(driver_score,axis=1)
-        return f"🏆 Best driver: **{df2.loc[df2['ds'].idxmax(),'driver']}** | ⚠️ Needs coaching: **{df2.loc[df2['ds'].idxmin(),'driver']}**"
-    if any(w in q for w in ["fleet","average","overall","index"]):
-        return f"📈 Fleet Safety Index: **{round(df['safety_index'].mean(),1)}/100**"
-    if any(w in q for w in ["maintenance","service","repair"]):
-        overdue=df[df["last_service_days"]>150]
-        ids=', '.join(overdue["vehicle_id"].tolist()) if len(overdue) else "None"
-        return f"🔧 **{len(overdue)}** vehicles overdue for service: {ids}"
-    if any(w in q for w in ["recommend","action","urgent","what should"]):
-        crit=df[df["status"].isin(["Critical","Emergency"])]
-        if not len(crit): return "✅ Fleet in good condition. Continue regular monitoring."
-        top=crit.iloc[0]
-        recs=generate_recs(top["faults"])
-        return f"🎯 Priority — **{top['vehicle_id']}**: "+" | ".join(recs[:3])
-    return "🤖 Try: 'Which vehicle needs urgent attention?', 'Who is the safest driver?', 'How many have low battery?', or 'What is the fleet index?'"
-
-def gen_telemetry():
-    now=datetime.now()
-    times=[now-timedelta(minutes=30*i) for i in range(48,0,-1)]
-    return pd.DataFrame({
-        "time":times,
-        "speed":    [max(0,min(120,60+30*np.sin(i/8)+random.gauss(0,10))) for i in range(48)],
-        "battery":  [max(10,80-i*0.5+random.gauss(0,2)) for i in range(48)],
-        "brake_temp":[max(100,160+30*np.sin(i/6)+random.gauss(0,15)) for i in range(48)],
-    })
-
-# ─────────────────────────────────────────────
-#  SESSION STATE
-# ─────────────────────────────────────────────
-if "fleet_data"   not in st.session_state: st.session_state.fleet_data=generate_vehicle_data(10)
-if "chat_history" not in st.session_state: st.session_state.chat_history=[{"role":"ai","text":"Hi! I'm Aegis AI. Ask me anything about your fleet — safety scores, driver behavior, or maintenance alerts."}]
-if "sim_log"      not in st.session_state: st.session_state.sim_log=[]
-if "mute_alerts"  not in st.session_state: st.session_state.mute_alerts=False
-
-# ─────────────────────────────────────────────
-#  COMPUTE DF
-# ─────────────────────────────────────────────
-df=st.session_state.fleet_data.copy()
-df["faults"]         =df.apply(detect_faults,axis=1)
-df["recommendations"]=df["faults"].apply(generate_recs)
-df[["mech","elec","digi","therm","drv_score","safety_index"]]=df.apply(lambda r:pd.Series(calculate_safety_score(r)),axis=1)
-df["status"]         =df["safety_index"].apply(classify_safety)
-df["fail_prob"]      =df.apply(predict_failure_prob,axis=1)
-df["maint_window"]   =df["fail_prob"].apply(maintenance_window)
-df["driver_score"]   =df.apply(driver_score,axis=1)
-
-FSI        =round(df["safety_index"].mean(),1)
-n_healthy  =len(df[df["status"]=="Healthy"])
-n_risk     =len(df[df["status"]=="At Risk"])
-n_critical =len(df[df["status"]=="Critical"])
-n_emergency=len(df[df["status"]=="Emergency"])
-
-# ─────────────────────────────────────────────
-#  SIDEBAR
-# ─────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("""
-    <div style='padding:16px 0 12px 0;'>
-        <div style='display:flex;align-items:center;gap:8px;'>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="3" y="4" width="18" height="14" rx="3" fill="#007AFF"/>
-              <circle cx="8.5" cy="9" r="1.5" fill="white"/>
-              <circle cx="15.5" cy="9" r="1.5" fill="white"/>
-              <rect x="9" y="13" width="6" height="1.5" rx="0.75" fill="white"/>
-              <rect x="10" y="2" width="4" height="3" rx="1" fill="#007AFF"/>
-              <rect x="11.25" y="18" width="1.5" height="2" rx="0.75" fill="#007AFF"/>
-              <rect x="8" y="19.5" width="8" height="1.2" rx="0.6" fill="#007AFF"/>
-            </svg>
-            <div style='font-family:Nunito,sans-serif;font-weight:800;font-size:1.2rem;color:#1C1C1E;'>Aegis</div>
-        </div>
-        <div style='font-size:0.7rem;color:#8E8E93;letter-spacing:0.1em;margin-top:4px;text-transform:uppercase;'>EV Safety Intelligence</div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.divider()
-    st.markdown("**Fleet Config**")
-    num_v=st.slider("Vehicles",5,20,10)
-    if st.button("🔄 Refresh Fleet Data"):
-        st.session_state.fleet_data=generate_vehicle_data(num_v)
-        st.session_state.sim_log=[]
-        st.rerun()
-    st.divider()
-    st.markdown("**Display**")
-    show_raw  =st.checkbox("Raw Telemetry Table",False)
-    show_tele =st.checkbox("Historical Telemetry Charts",False)
-    mute_alerts=st.checkbox("Mute Alerts",False)
-    st.divider()
-    st.markdown("**Fleet Health**")
-    for label,val,color in [("🟢 Healthy",n_healthy,"#34C759"),("🟡 At Risk",n_risk,"#FF9500"),
-                             ("🔴 Critical",n_critical,"#FF3B30"),("🆘 Emergency",n_emergency,"#FF3B30")]:
-        st.markdown(f"""<div style='display:flex;justify-content:space-between;padding:4px 0;font-size:0.83rem;'>
-            <span style='color:#3A3A3C;'>{label}</span>
-            <span style='font-weight:700;color:{color};'>{val}</span></div>""",unsafe_allow_html=True)
-    st.divider()
-    st.caption("VIT Smart Mobility · Team Aegis · 2026")
-
-# ─────────────────────────────────────────────
-#  HERO  (FIX 1: Aegis name | FIX 2: proper AI robot SVG head)
-# ─────────────────────────────────────────────
-fsi_color=("#34C759" if FSI>=80 else "#FF9500" if FSI>=60 else "#FF3B30")
-fsi_label=("Fleet is Stable" if FSI>=80 else "Moderate Risk" if FSI>=60 else "High Risk — Action Required")
-
-st.markdown(f"""
-<div class="hero-wrap">
-  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:20px;">
-    <div>
-      <div style="display:flex;align-items:center;gap:14px;">
-        <!-- FIX 2: Proper AI robot head SVG — not emoji -->
-        <div class="aegis-ai-head" title="Jarvis AI Active">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="5" width="18" height="13" rx="3.5" fill="white" fill-opacity="0.95"/>
-            <circle cx="8.5" cy="10" r="2" fill="#007AFF"/>
-            <circle cx="9.2" cy="9.3" r="0.6" fill="white"/>
-            <circle cx="15.5" cy="10" r="2" fill="#007AFF"/>
-            <circle cx="16.2" cy="9.3" r="0.6" fill="white"/>
-            <rect x="9.5" y="13.5" width="5" height="1.2" rx="0.6" fill="#34C759"/>
-            <rect x="10.5" y="2.5" width="3" height="3" rx="1" fill="white" fill-opacity="0.8"/>
-            <rect x="11.75" y="18" width="0.5" height="0.5" rx="0.25" fill="white"/>
-            <rect x="0" y="9" width="3" height="1.5" rx="0.75" fill="white" fill-opacity="0.6"/>
-            <rect x="21" y="9" width="3" height="1.5" rx="0.75" fill="white" fill-opacity="0.6"/>
-          </svg>
-        </div>
-        <!-- FIX 1: Brand name changed to Aegis -->
-        <div class="brand-name">Aegi<span>s</span></div>
-      </div>
-      <div class="brand-tag">Smart EV Fleet Safety Intelligence Platform</div>
-      <div style="margin-top:14px;">
-        <span class="live-badge"><span class="live-dot"></span>LIVE &nbsp;·&nbsp; {datetime.now().strftime("%d %b %Y, %H:%M")}</span>
-        &nbsp;
-        <span style="font-size:0.7rem;font-weight:600;color:#007AFF;background:rgba(0,122,255,0.08);border:1px solid rgba(0,122,255,0.2);border-radius:20px;padding:4px 10px;">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="#007AFF" style="vertical-align:middle;margin-right:3px;" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="5" width="18" height="13" rx="3.5" fill="#007AFF"/>
-            <circle cx="8.5" cy="10" r="2" fill="white"/>
-            <circle cx="15.5" cy="10" r="2" fill="white"/>
-            <rect x="9.5" y="13.5" width="5" height="1.2" rx="0.6" fill="#34C759"/>
-          </svg>
-          Jarvis Active
-        </span>
-      </div>
-    </div>
-    <div style="text-align:right;">
-      <div style="font-size:0.72rem;font-weight:600;color:#8E8E93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Fleet Safety Index</div>
-      <div style="font-family:Nunito,sans-serif;font-weight:800;font-size:3rem;color:{fsi_color};line-height:1;">
-        {FSI}<span style="font-size:1rem;color:#8E8E93;">/100</span>
-      </div>
-      <div style="font-size:0.78rem;font-weight:600;color:{fsi_color};margin-top:2px;">{fsi_label}</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ── GLOBAL JARVIS AUTO-ALERT ──
-_emg_ids   = [str(r['vehicle_id']) for _,r in df[df["status"]=="Emergency"].iterrows()]
-_emg_names = [str(r['driver'])     for _,r in df[df["status"]=="Emergency"].iterrows()]
-_risk_ids  = [str(r['vehicle_id']) for _,r in df[df["status"]=="At Risk"].iterrows()]
-_banner_h  = 0 if (not _emg_ids and not _risk_ids) else (100 if not _emg_ids else 130)
-
-st.components.v1.html(f"""
-<!DOCTYPE html><html><head>
-<style>
-body{{margin:0;padding:0;font-family:'Nunito',sans-serif;}}
-#emg-banner{{display:none;background:linear-gradient(135deg,#FF3B30,#CC1A10);color:white;border-radius:14px;padding:14px 18px;margin:4px 0;animation:epulse 0.7s ease-in-out infinite;box-shadow:0 4px 24px rgba(255,59,48,0.5);}}
-#risk-banner{{display:none;background:linear-gradient(135deg,#FF9500,#CC7700);color:white;border-radius:14px;padding:12px 18px;margin:4px 0;box-shadow:0 4px 16px rgba(255,149,0,0.35);}}
-@keyframes epulse{{0%,100%{{box-shadow:0 4px 24px rgba(255,59,48,0.5);}}50%{{box-shadow:0 4px 44px rgba(255,59,48,0.85);}}}}
-.b-title{{font-weight:800;font-size:0.95rem;}}.b-sub{{font-size:0.8rem;opacity:0.93;margin-top:3px;}}
-</style></head><body>
-<div id="emg-banner"><div class="b-title">🚨 JARVIS EMERGENCY ALERT</div><div class="b-sub" id="emg-text"></div></div>
-<div id="risk-banner"><div class="b-title">⚠️ JARVIS — VEHICLES AT RISK</div><div class="b-sub" id="risk-text"></div></div>
-<script>
-const EMG_IDS={_emg_ids};const EMG_NAMES={_emg_names};const RISK_IDS={_risk_ids};
-const synth=window.speechSynthesis;
-function getVoice(){{const vv=synth.getVoices();return vv.find(v=>v.name.includes('Daniel')||v.name.includes('Google UK')||v.name.includes('British'))||null;}}
-function speak(text,rate=0.87,pitch=0.78){{synth.cancel();const u=new SpeechSynthesisUtterance(text);u.rate=rate;u.pitch=pitch;u.volume=1.0;const v=getVoice();if(v)u.voice=v;synth.speak(u);}}
-function buzz(){{try{{const ctx=new(window.AudioContext||window.webkitAudioContext)();[[880,0.00],[660,0.22],[880,0.44],[660,0.66],[880,0.88]].forEach(([f,t])=>{{const o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.type='square';o.frequency.value=f;g.gain.setValueAtTime(0.7,ctx.currentTime+t);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+t+0.18);o.start(ctx.currentTime+t);o.stop(ctx.currentTime+t+0.22);}})}}catch(e){{}}}}
-function runAlerts(){{
-  if(EMG_IDS.length>0){{
-    document.getElementById('emg-banner').style.display='block';
-    document.getElementById('emg-text').innerText='Vehicles '+EMG_IDS.join(', ')+' ('+EMG_NAMES.join(', ')+') — EMERGENCY! Immediate action required.';
-    setTimeout(()=>{{buzz();setTimeout(()=>{{speak('Alert! Alert! Sir, '+EMG_IDS.length+' vehicle'+(EMG_IDS.length>1?'s are':' is')+' in emergency status. '+EMG_IDS.join(', ')+'. Driver'+(EMG_NAMES.length>1?'s ':' ')+EMG_NAMES.join(' and ')+' require'+(EMG_NAMES.length>1?'':'s')+' immediate assistance. I strongly urge you to act now, Sir!');}},1300);}},600);
-  }} else if(RISK_IDS.length>0){{
-    document.getElementById('risk-banner').style.display='block';
-    document.getElementById('risk-text').innerText=RISK_IDS.length+' vehicle(s) at risk: '+RISK_IDS.join(', ')+'. Monitoring closely.';
-    setTimeout(()=>{{speak('Sir, '+RISK_IDS.length+' vehicle'+(RISK_IDS.length>1?'s are':' is')+' currently at risk: '+RISK_IDS.join(', ')+'. I recommend reviewing the fleet at your earliest convenience.');}},1000);
-  }}
-}}
-if(synth.getVoices().length>0){{runAlerts();}}else{{synth.onvoiceschanged=runAlerts;setTimeout(runAlerts,2200);}}
-</script></body></html>
-""", height=_banner_h)
-
-# ─────────────────────────────────────────────
-#  KPI ROW
-# ─────────────────────────────────────────────
-k1,k2,k3,k4,k5,k6=st.columns(6)
-with k1: st.metric("🚗 Total",len(df))
-with k2: st.metric("✅ Healthy",n_healthy)
-with k3: st.metric("⚠️ At Risk",n_risk)
-with k4: st.metric("🔴 Critical",n_critical)
-with k5: st.metric("🆘 Emergency",n_emergency)
-with k6: st.metric("🔮 Avg Fail Risk",f"{round(df['fail_prob'].mean(),1)}%")
-
-# ─────────────────────────────────────────────
-#  ALERTS
-# ─────────────────────────────────────────────
-if not mute_alerts:
-    for _,ev in df[df["status"]=="Emergency"].iterrows():
-        st.error(f"🚨 EMERGENCY — {ev['vehicle_id']} ({ev['driver']}) | Score: {ev['safety_index']} | {', '.join(ev['faults'])}")
-    crit_df=df[df["status"]=="Critical"]
-    if len(crit_df):
-        st.warning(f"⚠️ CRITICAL — {len(crit_df)} vehicle(s): {', '.join(crit_df['vehicle_id'].tolist())}")
-
-st.divider()
-
-# ─────────────────────────────────────────────
-#  TABS
-# ─────────────────────────────────────────────
-tabs=st.tabs(["📡 Fleet Overview","🔮 Predictive AI","👤 Driver Analytics","🧬 Digital Twin","💬 AI Assistant","📈 Analytics","🎙️ Jarvis"])
-
-# ══════════════════════════════════════════
-#  TAB 1 — FLEET OVERVIEW
-# ══════════════════════════════════════════
-with tabs[0]:
-    st.markdown('<div class="section-title">Vehicle Safety Dashboard</div>',unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Real-time telemetry and fault monitoring across all EVs</div>',unsafe_allow_html=True)
-    for _,row in df.iterrows():
-        pill={"Healthy":"pill-green","At Risk":"pill-orange","Critical":"pill-red","Emergency":"pill-dark"}.get(row["status"],"pill-orange")
-        # FIX 4: healthy vehicles show no faults cleanly, no code leakage
-        fault_str=" &nbsp;·&nbsp; ".join(row["faults"]) if row["faults"] else "✅ No faults detected"
-        rec_str="<br>".join([f"<span style='color:#007AFF;'>→</span> {r}" for r in row["recommendations"][:3]]) if row["recommendations"] else ""
-        sc="#34C759" if row["safety_index"]>=82 else "#FF9500" if row["safety_index"]>=63 else "#FF3B30"
-        fc="#FF3B30" if row["fail_prob"]>60 else "#FF9500" if row["fail_prob"]>30 else "#34C759"
-        # FIX 4: icon tied to status not threshold
-        risk_icon="✅" if row["status"]=="Healthy" else "⚠️"
-        rec_block=f"<div style='margin-top:8px;font-size:0.75rem;color:#8E8E93;line-height:1.7;'>{rec_str}</div>" if rec_str else ""
+    @staticmethod
+    def inject_css():
         st.markdown(f"""
-        <div class="apple-card">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px;">
-            <div style="flex:1;min-width:260px;">
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-                <span style="font-family:Nunito,sans-serif;font-weight:800;font-size:1rem;color:#1C1C1E;">{row['vehicle_id']}</span>
-                <span class="status-pill {pill}">{row['status']}</span>
-              </div>
-              <div style="font-size:0.78rem;color:#8E8E93;margin-bottom:8px;">{row['model']} &nbsp;·&nbsp; 👤 {row['driver']} &nbsp;·&nbsp; {row['mileage']:,} km</div>
-              <div style="font-size:0.79rem;color:#3A3A3C;">{fault_str}</div>
-              {rec_block}
-            </div>
-            <div style="text-align:right;min-width:180px;">
-              <div style="font-family:Nunito,sans-serif;font-weight:800;font-size:2rem;color:{sc};line-height:1.1;">
-                {row['safety_index']}<span style="font-size:0.8rem;color:#8E8E93;font-weight:400;">/100</span>
-              </div>
-              <div style="font-size:0.65rem;color:#8E8E93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">Safety Index</div>
-              <div style="font-size:0.77rem;margin-bottom:4px;">
-                <span style="color:{fc};font-weight:600;">{risk_icon} {row['fail_prob']}% failure risk</span>
-              </div>
-              <div style="font-size:0.73rem;color:#8E8E93;">🔧 {row['maint_window']}</div>
-              <div style="margin-top:8px;font-size:0.72rem;color:#8E8E93;">⚡{row['battery']}% &nbsp;|&nbsp; 🌡{row['brake_temp']}°C &nbsp;|&nbsp; 🏎 {row['speed']}km/h</div>
-            </div>
-          </div>
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Syncopate:wght@400;700&family=Courier+Prime&display=swap');
+        html, body, [data-testid="stAppViewContainer"] {{
+            background: radial-gradient(ellipse at center, #0d0d1f 0%, #050510 100%) !important;
+            color: #e0e8ff; font-family: 'Courier Prime', monospace;
+        }}
+        [data-testid="stSidebar"] {{
+            background: rgba(5,5,20,0.92) !important;
+            border-right: 1px solid {AegisUI.BORDER};
+        }}
+        .glitch-header {{
+            font-family: 'Syncopate', sans-serif; font-size: 2rem; font-weight: 700;
+            color: {AegisUI.CYAN};
+            text-shadow: 0 0 8px {AegisUI.CYAN}, 0 0 20px {AegisUI.CYAN},
+                         2px 0 {AegisUI.PINK}, -2px 0 {AegisUI.CYAN};
+            letter-spacing: 4px; margin-bottom: 0.2rem;
+        }}
+        .sub-header {{
+            font-family: 'Syncopate', sans-serif; font-size: 0.75rem;
+            color: rgba(0,210,255,0.55); letter-spacing: 6px; margin-bottom: 1.5rem;
+        }}
+        .metric-card {{
+            background: {AegisUI.CARD}; border: 1px solid {AegisUI.BORDER};
+            border-radius: 12px; padding: 1.1rem 1.4rem;
+            backdrop-filter: blur(12px); transition: box-shadow .25s;
+        }}
+        .metric-card:hover {{ box-shadow: 0 0 18px rgba(0,210,255,0.35); }}
+        .metric-value {{
+            font-family: 'Syncopate', sans-serif; font-size: 2rem;
+            font-weight: 700; color: {AegisUI.CYAN};
+        }}
+        .metric-label {{
+            font-size: 0.72rem; letter-spacing: 3px;
+            color: rgba(224,232,255,0.55); text-transform: uppercase;
+        }}
+        .metric-delta-pos {{ color: #00ff9f; font-size: 0.8rem; }}
+        .metric-delta-neg {{ color: {AegisUI.PINK}; font-size: 0.8rem; }}
+        .log-block {{
+            background: rgba(0,0,0,0.55); border-left: 3px solid {AegisUI.CYAN};
+            border-radius: 4px; padding: 0.8rem 1rem;
+            font-family: 'Courier Prime', monospace; font-size: 0.78rem;
+            color: #a0ffcc; max-height: 280px; overflow-y: auto;
+        }}
+        .log-warn {{ color: #ffdd57; }}
+        .log-crit {{ color: {AegisUI.PINK}; }}
+        .sidebar-logo {{
+            font-family: 'Syncopate', sans-serif; font-size: 1.4rem; font-weight: 700;
+            color: {AegisUI.CYAN}; text-align: center; letter-spacing: 6px;
+            padding: 1rem 0 0.3rem; text-shadow: 0 0 14px {AegisUI.CYAN};
+        }}
+        .stProgress > div > div > div > div {{
+            background: linear-gradient(90deg, {AegisUI.CYAN}, {AegisUI.PINK});
+        }}
+        .stButton > button {{
+            background: transparent; border: 1px solid {AegisUI.CYAN};
+            color: {AegisUI.CYAN}; border-radius: 6px;
+            font-family: 'Syncopate', sans-serif; font-size: 0.7rem;
+            letter-spacing: 2px; transition: all .2s;
+        }}
+        .stButton > button:hover {{
+            background: rgba(0,210,255,0.12); box-shadow: 0 0 12px {AegisUI.CYAN};
+        }}
+        #MainMenu, footer, header {{ visibility: hidden; }}
+        </style>""", unsafe_allow_html=True)
+
+    @staticmethod
+    def header(title: str, sub: str = ""):
+        st.markdown(f'<div class="glitch-header">{title}</div>', unsafe_allow_html=True)
+        if sub:
+            st.markdown(f'<div class="sub-header">{sub}</div>', unsafe_allow_html=True)
+
+    @staticmethod
+    def metric_card(col, label: str, value: str, delta: str = "", positive: bool = True):
+        cls  = "metric-delta-pos" if positive else "metric-delta-neg"
+        d_html = f'<div class="{cls}">{delta}</div>' if delta else ""
+        col.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+            {d_html}
         </div>""", unsafe_allow_html=True)
-    if show_raw:
-        st.markdown("**Raw Telemetry Data**")
-        cols=["vehicle_id","model","driver","speed","battery","brake_temp","motor_temp","regen_efficiency","vibration","network_status","safety_index","status"]
-        st.dataframe(df[cols].set_index("vehicle_id"),use_container_width=True)
 
-# ══════════════════════════════════════════
-#  TAB 2 — PREDICTIVE AI
-# ══════════════════════════════════════════
-with tabs[1]:
-    st.markdown('<div class="section-title">Predictive Maintenance Intelligence</div>',unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">AI-simulated failure probabilities based on multi-parameter telemetry analysis</div>',unsafe_allow_html=True)
-    c1,c2=st.columns([2,1])
-    with c1:
-        bar_colors=["#FF3B30" if p>60 else "#FF9500" if p>30 else "#34C759" for p in df["fail_prob"]]
-        fig_pred=go.Figure()
-        fig_pred.add_trace(go.Bar(x=df["vehicle_id"],y=df["fail_prob"],marker_color=bar_colors,
-            text=[f"{p}%" for p in df["fail_prob"]],textposition="outside",
-            textfont=dict(family="DM Mono",size=10,color="#3A3A3C")))
-        fig_pred.add_hline(y=60,line_dash="dot",line_color="rgba(255,59,48,0.5)",
-                           annotation_text="High Risk",annotation_font_color="#FF3B30",annotation_font_size=11)
-        fig_pred.add_hline(y=30,line_dash="dot",line_color="rgba(255,149,0,0.5)",
-                           annotation_text="Moderate Risk",annotation_font_color="#FF9500",annotation_font_size=11)
-        apple_layout(fig_pred,height=320,title="Failure Probability by Vehicle (%)")
-        fig_pred.update_layout(yaxis=dict(range=[0,115]))
-        st.plotly_chart(fig_pred,use_container_width=True)
-    with c2:
-        st.markdown("**Maintenance Schedule**")
-        for _,r in df[["vehicle_id","fail_prob","maint_window"]].sort_values("fail_prob",ascending=False).iterrows():
-            dot="🔴" if r["fail_prob"]>60 else "🟡" if r["fail_prob"]>30 else "🟢"
-            st.markdown(f"""<div class="apple-card-sm">
-                <div style="font-weight:700;font-size:0.85rem;color:#1C1C1E;">{dot} {r['vehicle_id']}</div>
-                <div style="font-size:0.73rem;color:#8E8E93;margin-top:2px;">{r['maint_window']} &nbsp;·&nbsp; {r['fail_prob']}% risk</div>
-            </div>""",unsafe_allow_html=True)
-    st.divider()
-    st.markdown('<div class="section-title">Multi-Dimensional Safety Analysis</div>',unsafe_allow_html=True)
-    sel_v=st.selectbox("Select Vehicle",df["vehicle_id"].tolist(),key="pred_sel")
-    vrow=df[df["vehicle_id"]==sel_v].iloc[0]
-    cats=["Mechanical","Electrical","Digital","Thermal","Driver"]
-    vals=[vrow["mech"],vrow["elec"],vrow["digi"],vrow["therm"],vrow["drv_score"]]
-    ra1,ra2=st.columns([1,1])
-    with ra1:
-        fig_radar=go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(r=vals+[vals[0]],theta=cats+[cats[0]],fill='toself',
-            fillcolor='rgba(0,122,255,0.1)',line=dict(color='#007AFF',width=2.5)))
-        fig_radar.update_layout(
-            polar=dict(bgcolor="rgba(242,242,247,0.6)",
-                radialaxis=dict(visible=True,range=[0,100],color="#8E8E93",gridcolor="#E5E5EA",tickfont=dict(size=9)),
-                angularaxis=dict(color="#3A3A3C",tickfont=dict(size=11,family="Nunito"))),
-            paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-            showlegend=False,height=320,margin=dict(t=20,b=20,l=30,r=30))
-        st.plotly_chart(fig_radar,use_container_width=True)
-    with ra2:
-        st.markdown(f"**{sel_v} Health Breakdown**")
-        st.markdown("<div style='height:8px'></div>",unsafe_allow_html=True)
-        for cat,val in zip(cats,vals):
-            bc="#34C759" if val>=80 else "#FF9500" if val>=60 else "#FF3B30"
-            st.markdown(f"""<div style="margin:10px 0;">
-                <div style="display:flex;justify-content:space-between;font-size:0.82rem;color:#3A3A3C;margin-bottom:4px;font-weight:600;">
-                    <span>{cat}</span><span style="color:{bc};font-family:'DM Mono',monospace;">{val:.0f}</span>
-                </div>
-                <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:{val}%;background:{bc};"></div></div>
-            </div>""",unsafe_allow_html=True)
+    @staticmethod
+    def log_line(text: str, level: str = "info") -> str:
+        ts  = datetime.datetime.now().strftime("%H:%M:%S")
+        cls = {"warn": "log-warn", "crit": "log-crit"}.get(level, "")
+        return f'<span class="{cls}">[{ts}] {text}</span><br>'
 
-# ══════════════════════════════════════════
-#  TAB 3 — DRIVER ANALYTICS
-# ══════════════════════════════════════════
-with tabs[2]:
-    st.markdown('<div class="section-title">Driver Behavior & Safety Leaderboard</div>',unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Ranked by driving score — braking, acceleration, and speed compliance</div>',unsafe_allow_html=True)
-    drv_df=df[["vehicle_id","driver","driver_score","harsh_braking","rapid_accel","overspeed_events","trips_today"]].sort_values("driver_score",ascending=False).reset_index(drop=True)
-    medals=["🥇","🥈","🥉"]+[f"#{i+4}" for i in range(len(drv_df)-3)]
-    for i,(_,r) in enumerate(drv_df.iterrows()):
-        sc="#34C759" if r["driver_score"]>=80 else "#FF9500" if r["driver_score"]>=60 else "#FF3B30"
-        st.markdown(f"""<div class="apple-card" style="padding:16px 24px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
-                <div style="display:flex;align-items:center;gap:16px;">
-                    <div style="font-size:1.6rem;min-width:36px;text-align:center;">{medals[i]}</div>
-                    <div>
-                        <div style="font-weight:700;font-size:0.95rem;color:#1C1C1E;">{r['driver']}</div>
-                        <div style="font-size:0.75rem;color:#8E8E93;margin-top:2px;">{r['vehicle_id']} &nbsp;·&nbsp; {r['trips_today']} trips today</div>
-                    </div>
-                </div>
-                <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
-                    <div style="text-align:center;">
-                        <div style="font-size:0.62rem;color:#8E8E93;text-transform:uppercase;letter-spacing:0.06em;">Harsh Brake</div>
-                        <div style="font-family:'DM Mono',monospace;font-weight:600;color:#FF9500;">{r['harsh_braking']}x</div>
-                    </div>
-                    <div style="text-align:center;">
-                        <div style="font-size:0.62rem;color:#8E8E93;text-transform:uppercase;letter-spacing:0.06em;">Rapid Accel</div>
-                        <div style="font-family:'DM Mono',monospace;font-weight:600;color:#FF9500;">{r['rapid_accel']}x</div>
-                    </div>
-                    <div style="text-align:center;">
-                        <div style="font-size:0.62rem;color:#8E8E93;text-transform:uppercase;letter-spacing:0.06em;">Overspeed</div>
-                        <div style="font-family:'DM Mono',monospace;font-weight:600;color:#FF3B30;">{r['overspeed_events']}x</div>
-                    </div>
-                    <div style="text-align:center;min-width:70px;">
-                        <div style="font-family:Nunito,sans-serif;font-weight:800;font-size:1.8rem;color:{sc};line-height:1;">{r['driver_score']}</div>
-                        <div style="font-size:0.62rem;color:#8E8E93;text-transform:uppercase;letter-spacing:0.06em;">Score</div>
-                    </div>
-                </div>
-            </div>
-        </div>""",unsafe_allow_html=True)
-    st.divider()
-    d1,d2=st.columns(2)
-    with d1:
-        fig_ds=px.bar(drv_df,x="driver",y="driver_score",color="driver_score",
-                      color_continuous_scale=["#FF3B30","#FF9500","#34C759"],range_color=[0,100])
-        apple_layout(fig_ds,height=280,title="Driver Score Comparison")
-        fig_ds.update_layout(xaxis=dict(tickangle=30),coloraxis_showscale=False,margin=dict(t=44,b=80,l=10,r=10))
-        st.plotly_chart(fig_ds,use_container_width=True)
-    with d2:
-        fig_events=go.Figure()
-        fig_events.add_trace(go.Bar(name="Harsh Braking",x=drv_df["driver"],y=drv_df["harsh_braking"],marker_color="#FF3B30"))
-        fig_events.add_trace(go.Bar(name="Rapid Accel",  x=drv_df["driver"],y=drv_df["rapid_accel"],  marker_color="#FF9500"))
-        fig_events.add_trace(go.Bar(name="Overspeed",    x=drv_df["driver"],y=drv_df["overspeed_events"],marker_color="#FF6B35"))
-        fig_events.update_layout(barmode="group")
-        apple_layout(fig_events,height=280,title="Risk Events by Driver")
-        fig_events.update_layout(xaxis=dict(tickangle=30),margin=dict(t=44,b=80,l=10,r=10))
-        st.plotly_chart(fig_events,use_container_width=True)
+    @staticmethod
+    def dark_fig(fig: go.Figure, title: str = "") -> go.Figure:
+        fig.update_layout(
+            title=dict(text=title, font=dict(family="Syncopate", size=13, color=AegisUI.CYAN)),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(10,10,20,0.6)",
+            font=dict(color="#a0b0d0", family="Courier Prime"),
+            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=AegisUI.BORDER),
+            margin=dict(l=40, r=20, t=45, b=35),
+        )
+        fig.update_xaxes(gridcolor="rgba(0,210,255,0.07)", zerolinecolor="rgba(0,210,255,0.15)")
+        fig.update_yaxes(gridcolor="rgba(0,210,255,0.07)", zerolinecolor="rgba(0,210,255,0.15)")
+        return fig
 
-# ══════════════════════════════════════════
-#  TAB 4 — DIGITAL TWIN
-# ══════════════════════════════════════════
-with tabs[3]:
-    st.markdown('<div class="section-title">Digital Twin Simulation Lab</div>',unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Inject real-world fault scenarios and observe live safety impact</div>',unsafe_allow_html=True)
-    col_info,col_sim=st.columns([1,2])
-    with col_info:
-        sim_v=st.selectbox("Select Vehicle",df["vehicle_id"].tolist(),key="twin_sel")
-        sv=st.session_state.fleet_data[st.session_state.fleet_data["vehicle_id"]==sim_v].iloc[0]
-        rows_html="".join([
-            f"<div style='display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #F2F2F7;font-size:0.82rem;'>"
-            f"<span style='color:#8E8E93;'>{k}</span>"
-            f"<span style='font-family:DM Mono,monospace;font-weight:600;color:#1C1C1E;'>{v}</span></div>"
-            for k,v in [("Battery",f"{sv['battery']}%"),("Brake Temp",f"{sv['brake_temp']}°C"),
-                        ("Motor Temp",f"{sv['motor_temp']}°C"),("Speed",f"{sv['speed']} km/h"),
-                        ("Network","OK ✅" if sv['network_status']==1 else "FAULT ❌")]
-        ])
-        st.markdown(f"""<div class="apple-card">
-            <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:12px;">Current State</div>
-            {rows_html}
-        </div>""",unsafe_allow_html=True)
-    with col_sim:
-        st.markdown("**Inject Fault Scenario**")
-        fc1,fc2,fc3=st.columns(3)
-        with fc1:
-            if st.button("🔥 Brake Failure"):
-                st.session_state.fleet_data.loc[st.session_state.fleet_data["vehicle_id"]==sim_v,"brake_temp"]=255
-                st.session_state.sim_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sim_v} → Brake failure (255°C)")
-                st.rerun()
-            if st.button("⚡ Battery Drop"):
-                st.session_state.fleet_data.loc[st.session_state.fleet_data["vehicle_id"]==sim_v,"battery"]=8
-                st.session_state.sim_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sim_v} → Battery drop (8%)")
-                st.rerun()
-        with fc2:
-            if st.button("🌡 Motor Overheat"):
-                st.session_state.fleet_data.loc[st.session_state.fleet_data["vehicle_id"]==sim_v,"motor_temp"]=125
-                st.session_state.sim_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sim_v} → Motor overheat")
-                st.rerun()
-            if st.button("📡 Network Cut"):
-                st.session_state.fleet_data.loc[st.session_state.fleet_data["vehicle_id"]==sim_v,"network_status"]=0
-                st.session_state.sim_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sim_v} → Network failure")
-                st.rerun()
-        with fc3:
-            if st.button("🚨 Overspeed"):
-                st.session_state.fleet_data.loc[st.session_state.fleet_data["vehicle_id"]==sim_v,"speed"]=125
-                st.session_state.sim_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sim_v} → Overspeed (125 km/h)")
-                st.rerun()
-            if st.button("✅ Reset"):
-                st.session_state.fleet_data.loc[st.session_state.fleet_data["vehicle_id"]==sim_v,
-                    ["battery","brake_temp","motor_temp","speed","network_status"]]=[
-                    random.randint(40,90),random.randint(120,175),random.randint(60,88),random.randint(40,80),1]
-                st.session_state.sim_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {sim_v} → Reset to nominal")
-                st.rerun()
-        st.markdown("**Simulation Log**")
-        if st.session_state.sim_log:
-            for entry in reversed(st.session_state.sim_log[-8:]):
-                st.markdown(f'<div class="log-entry">{entry}</div>',unsafe_allow_html=True)
-        else:
-            st.caption("No events logged yet. Inject a fault above.")
-    if show_tele:
-        st.divider()
-        st.markdown(f'<div class="section-title">24-Hour Telemetry — {sim_v}</div>',unsafe_allow_html=True)
-        hist=gen_telemetry()
-        fig_tele=make_subplots(rows=3,cols=1,shared_xaxes=True,
-                               subplot_titles=["Speed (km/h)","Battery (%)","Brake Temp (°C)"],vertical_spacing=0.1)
-        for i,(col,color) in enumerate(zip(["speed","battery","brake_temp"],["#007AFF","#34C759","#FF3B30"]),1):
-            r_hex=color.lstrip('#')
-            r_int=tuple(int(r_hex[j:j+2],16) for j in (0,2,4))
-            fill_color=f"rgba({r_int[0]},{r_int[1]},{r_int[2]},0.07)"
-            fig_tele.add_trace(go.Scatter(x=hist["time"],y=hist[col],mode="lines",
-                line=dict(color=color,width=2),fill="tozeroy",fillcolor=fill_color),row=i,col=1)
-        fig_tele.update_layout(height=380,showlegend=False,plot_bgcolor=PLOT_BG,paper_bgcolor=PAPER_BG,
-                               font=dict(family=FONT,color=TICK_COLOR),margin=dict(t=30,b=20,l=10,r=10))
-        for i in range(1,4):
-            fig_tele.update_xaxes(showgrid=False,color=TICK_COLOR,row=i,col=1)
-            fig_tele.update_yaxes(showgrid=True,gridcolor=GRID_COLOR,color=TICK_COLOR,row=i,col=1)
-        st.plotly_chart(fig_tele,use_container_width=True)
 
-# ══════════════════════════════════════════
-#  TAB 5 — AI ASSISTANT
-# ══════════════════════════════════════════
-with tabs[4]:
-    st.markdown('<div class="section-title">Aegis AI Assistant</div>',unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Ask anything about your fleet in plain English</div>',unsafe_allow_html=True)
-    for msg in st.session_state.chat_history:
-        if msg["role"]=="user":
-            st.markdown(f'<div style="display:flex;justify-content:flex-end;"><div class="chat-user">{msg["text"]}</div></div>',unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div style="display:flex;justify-content:flex-start;"><div class="chat-ai">🤖 {msg["text"]}</div></div>',unsafe_allow_html=True)
-    st.markdown("<div style='height:12px'></div>",unsafe_allow_html=True)
-    st.markdown("**Quick Questions**")
-    qqs=["Which vehicle needs urgent attention?","Who is the safest driver?",
-         "What is the fleet safety index?","How many have low battery?","Which need maintenance?"]
-    qcols=st.columns(len(qqs))
-    for i,(q,col) in enumerate(zip(qqs,qcols)):
-        with col:
-            if st.button(q,key=f"qq_{i}"):
-                st.session_state.chat_history.append({"role":"user","text":q})
-                st.session_state.chat_history.append({"role":"ai","text":fleet_ai_response(q,df)})
-                st.rerun()
-    user_input=st.text_input("Type your question...",placeholder="e.g. Which vehicle has the worst brake health?",key="chat_inp")
-    cs,cc=st.columns([1,5])
-    with cs:
-        if st.button("Send ➤") and user_input.strip():
-            st.session_state.chat_history.append({"role":"user","text":user_input})
-            st.session_state.chat_history.append({"role":"ai","text":fleet_ai_response(user_input,df)})
-            st.rerun()
-    with cc:
-        if st.button("🗑 Clear Chat"):
-            st.session_state.chat_history=[{"role":"ai","text":"Hi! I'm Aegis AI. Ask me anything about your EV fleet."}]
-            st.rerun()
+# =============================================================================
+#  CLASS: AegisData
+# =============================================================================
+class AegisData:
+    VEHICLE_IDS = [f"EV-{100+i}" for i in range(20)]
+    CITIES      = ["Chennai","Mumbai","Delhi","Bengaluru","Hyderabad","Pune","Kolkata","Ahmedabad"]
+    COMPONENTS  = ["Battery Pack","Motor Drive","BMS","Inverter","Thermal Mgmt","Regen Brake"]
+    ERRORS      = ["SOC_DRIFT","TEMP_SPIKE","CAN_TIMEOUT","BMS_FAULT","OTA_FAIL","SENSOR_ERR","OVERVOLT"]
+    AI_RES      = ["Auto-Healed","Resolved via OTA","Flagged for Inspection","Thermal Reset","Ignored-Low","Escalated"]
+    CITY_COORDS = {
+        "Chennai":   (13.0827, 80.2707), "Mumbai":    (19.0760, 72.8777),
+        "Delhi":     (28.6139, 77.2090), "Bengaluru": (12.9716, 77.5946),
+        "Hyderabad": (17.3850, 78.4867), "Pune":      (18.5204, 73.8567),
+        "Kolkata":   (22.5726, 88.3639), "Ahmedabad": (23.0225, 72.5714),
+    }
 
-# ══════════════════════════════════════════
-#  TAB 6 — ANALYTICS
-# ══════════════════════════════════════════
-with tabs[5]:
-    st.markdown('<div class="section-title">Fleet Analytics & Intelligence</div>',unsafe_allow_html=True)
-    a1,a2=st.columns(2)
-    with a1:
-        status_counts=df["status"].value_counts().reset_index()
-        status_counts.columns=["Status","Count"]
-        fig_pie=px.pie(status_counts,values="Count",names="Status",hole=0.5,
-                       color="Status",color_discrete_map={"Healthy":"#34C759","At Risk":"#FF9500","Critical":"#FF3B30","Emergency":"#AC1A14"})
-        apple_layout(fig_pie,height=300,title="Fleet Status Distribution")
-        st.plotly_chart(fig_pie,use_container_width=True)
-    with a2:
-        fig_scat=px.scatter(df,x="battery",y="safety_index",color="status",size="fail_prob",
-                            hover_data=["vehicle_id","driver","model"],
-                            color_discrete_map={"Healthy":"#34C759","At Risk":"#FF9500","Critical":"#FF3B30","Emergency":"#AC1A14"})
-        apple_layout(fig_scat,height=300,title="Battery Level vs Safety Index")
-        st.plotly_chart(fig_scat,use_container_width=True)
-    a3,a4=st.columns(2)
-    with a3:
-        fig_hist_chart=px.histogram(df,x="safety_index",nbins=10,color_discrete_sequence=["#007AFF"])
-        fig_hist_chart.add_vline(x=FSI,line_dash="dash",line_color="#34C759",
-                                  annotation_text=f"Fleet Avg: {FSI}",annotation_font_color="#34C759",annotation_font_size=11)
-        apple_layout(fig_hist_chart,height=280,title="Safety Score Distribution")
-        st.plotly_chart(fig_hist_chart,use_container_width=True)
-    with a4:
-        fig_temp=go.Figure()
-        fig_temp.add_trace(go.Scatter(x=df["vehicle_id"],y=df["brake_temp"],mode="lines+markers",name="Brake Temp",
-                           line=dict(color="#FF3B30",width=2),marker=dict(size=6)))
-        fig_temp.add_trace(go.Scatter(x=df["vehicle_id"],y=df["motor_temp"],mode="lines+markers",name="Motor Temp",
-                           line=dict(color="#FF9500",width=2),marker=dict(size=6)))
-        fig_temp.add_hline(y=200,line_dash="dot",line_color="rgba(255,59,48,0.45)",
-                           annotation_text="Brake Limit",annotation_font_color="#FF3B30",annotation_font_size=10)
-        fig_temp.add_hline(y=100,line_dash="dot",line_color="rgba(255,149,0,0.45)",
-                           annotation_text="Motor Limit",annotation_font_color="#FF9500",annotation_font_size=10)
-        apple_layout(fig_temp,height=280,title="Thermal Profile Across Fleet")
-        st.plotly_chart(fig_temp,use_container_width=True)
-    st.divider()
-    st.markdown('<div class="section-title">Fleet Risk Pattern Detection</div>',unsafe_allow_html=True)
-    brake_n  =df["faults"].apply(lambda x:any("Brake" in f for f in x)).sum()
-    network_n=df["faults"].apply(lambda x:any("Network" in f for f in x)).sum()
-    battery_n=df["faults"].apply(lambda x:any("Battery" in f for f in x)).sum()
-    motor_n  =df["faults"].apply(lambda x:any("Motor" in f for f in x)).sum()
-    rp1,rp2,rp3,rp4=st.columns(4)
-    for col,label,count,thr in [(rp1,"🛞 Brake Risk",brake_n,3),(rp2,"📡 Network Risk",network_n,3),
-                                 (rp3,"⚡ Battery Risk",battery_n,3),(rp4,"🌡 Thermal Risk",motor_n,3)]:
-        with col:
-            if count>=thr: st.error(f"**{label}**\n{count} vehicles affected")
-            else:          st.success(f"**{label}**\n{count} affected — OK")
+    @staticmethod
+    def fleet_snapshot(seed: int = 42):
+        rng    = np.random.default_rng(seed)
+        n      = 20
+        lats   = rng.uniform(8.5, 28.5, n)
+        lons   = rng.uniform(72.5, 88.5, n)
+        soc    = rng.integers(15, 100, n)
+        speed  = rng.integers(0, 120, n)
+        status = rng.choice(["ACTIVE","IDLE","CHARGING","ALERT"], n, p=[0.50,0.25,0.18,0.07])
+        cities = rng.choice(AegisData.CITIES, n)
+        temps  = rng.uniform(28, 52, n).round(1)
+        return pd.DataFrame({
+            "vehicle": AegisData.VEHICLE_IDS, "lat": lats, "lon": lons,
+            "soc": soc, "speed_kmh": speed, "city": cities,
+            "status": status, "temp_c": temps,
+        })
 
-# ══════════════════════════════════════════
-#  TAB 7 — JARVIS VOICE + GESTURE ASSISTANT
-# ══════════════════════════════════════════
-with tabs[6]:
-    st.markdown('<div class="section-title">🤖 Jarvis — Voice & Gesture Intelligence</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-sub">Choose your interaction mode — voice for general users, hand gestures for differently abled users</div>', unsafe_allow_html=True)
+    @staticmethod
+    def rul_data():
+        records = []
+        for comp in AegisData.COMPONENTS:
+            days     = np.arange(0, 365)
+            base_rul = random.randint(200, 365)
+            noise    = np.random.normal(0, 8, len(days))
+            stress   = np.clip(100 - (days / base_rul) * 100 + noise, 0, 100)
+            stress_s = savgol_filter(stress, 21, 3) if SCIPY_AVAILABLE else stress
+            for d, s in zip(days[::7], stress_s[::7]):
+                records.append({"day": int(d), "health_%": round(float(s), 2), "component": comp})
+        return pd.DataFrame(records)
 
-    # ── Mode Selector ──
-    st.markdown("""
-    <div style="display:flex;gap:12px;margin:16px 0 24px 0;flex-wrap:wrap;">
-        <div style="font-size:0.78rem;font-weight:700;color:#8E8E93;align-self:center;text-transform:uppercase;letter-spacing:0.08em;">Select Mode:</div>
-    </div>
-    """, unsafe_allow_html=True)
+    @staticmethod
+    def cyber_events(n=18):
+        types = ["PORT_SCAN","BRUTE_FORCE","MITM","REPLAY","DDOS","SQL_INJECT","ARP_SPOOF"]
+        sevs  = ["LOW","MED","HIGH","CRITICAL"]
+        rows  = []
+        for _ in range(n):
+            ts = datetime.datetime.now() - datetime.timedelta(seconds=random.randint(0, 3600))
+            rows.append({
+                "timestamp": ts.strftime("%H:%M:%S"),
+                "src_ip":    f"192.168.{random.randint(1,254)}.{random.randint(1,254)}",
+                "event":     random.choice(types),
+                "severity":  random.choice(sevs),
+                "blocked":   random.choice(["YES","YES","YES","NO"]),
+                "hash":      hashlib.md5(str(random.random()).encode()).hexdigest()[:12],
+            })
+        return pd.DataFrame(rows).sort_values("timestamp", ascending=False)
 
-    mode_col1, mode_col2, mode_col3 = st.columns([1, 1, 4])
-    with mode_col1:
-        general_btn = st.button("🎙️ General User", key="mode_general", use_container_width=True)
-    with mode_col2:
-        special_btn = st.button("🤟 Differently Abled", key="mode_special", use_container_width=True)
+    @staticmethod
+    def energy_data():
+        hrs = list(range(24))
+        grd = [round(random.uniform(20, 95), 1) for _ in hrs]
+        sol = [round(max(0, random.gauss(60, 20)) if 6 <= h <= 18 else 0, 1) for h in hrs]
+        reg = [round(random.uniform(5, 30), 1) for _ in hrs]
+        dem = [round(g+s+r, 1) for g, s, r in zip(grd, sol, reg)]
+        return pd.DataFrame({"hour": hrs, "grid_kw": grd, "solar_kw": sol, "regen_kw": reg, "demand_kw": dem})
 
-    if "jarvis_mode" not in st.session_state:
-        st.session_state.jarvis_mode = "general"
-    if general_btn:
-        st.session_state.jarvis_mode = "general"
-    if special_btn:
-        st.session_state.jarvis_mode = "special"
+    @staticmethod
+    def blackbox_logs(n=40):
+        rows = []
+        for _ in range(n):
+            ts = datetime.datetime.now() - datetime.timedelta(minutes=random.randint(0, 1440))
+            rows.append({
+                "timestamp":     ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "vehicle":       random.choice(AegisData.VEHICLE_IDS),
+                "error_code":    random.choice(AegisData.ERRORS),
+                "severity":      random.choice(["INFO","WARN","ERROR","CRITICAL"]),
+                "ai_resolution": random.choice(AegisData.AI_RES),
+                "duration_ms":   random.randint(50, 5000),
+            })
+        return pd.DataFrame(rows).sort_values("timestamp", ascending=False).reset_index(drop=True)
 
-    current_mode = st.session_state.jarvis_mode
-
-    # mode pill indicator
-    pill_color = "#007AFF" if current_mode == "general" else "#34C759"
-    pill_label = "🎙️ General User — Voice Mode" if current_mode == "general" else "🤟 Differently Abled — Hand Gesture Mode"
-    st.markdown(f"""
-    <div style="display:inline-flex;align-items:center;gap:8px;background:rgba({('0,122,255' if current_mode=='general' else '52,199,89')},0.1);
-        border:1px solid rgba({('0,122,255' if current_mode=='general' else '52,199,89')},0.3);
-        border-radius:20px;padding:6px 16px;margin-bottom:20px;font-size:0.82rem;font-weight:700;color:{pill_color};">
-        {pill_label}
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.divider()
-
-    # ═══════════════════════════════════════
-    #  GENERAL MODE — Voice (existing)
-    # ═══════════════════════════════════════
-    if current_mode == "general":
-        jarvis_commands=[
-            ("Hello Jarvis","Auto full fleet briefing"),
-            ("Fleet status","Overall health summary"),
-            ("Which vehicle is critical?","Most dangerous vehicle"),
-            ("Who is the best driver?","Top driver leaderboard"),
-            ("Battery report","Low battery vehicles"),
-            ("Maintenance alert","Overdue service vehicles"),
-            ("Safety index","Current fleet safety score"),
-            ("Failure risk","Highest breakdown probability"),
+    @staticmethod
+    def ota_packages():
+        return [
+            {"name":"Kernel v4.7.2",    "size":"128 MB","progress":random.randint(60,100),"status":"DEPLOYING"},
+            {"name":"BMS Firmware 3.1", "size":"42 MB", "progress":100,                   "status":"COMPLETE"},
+            {"name":"Telematics SDK",   "size":"18 MB", "progress":random.randint(0,80),  "status":"QUEUED"},
+            {"name":"Thermal Model v2", "size":"9 MB",  "progress":100,                   "status":"COMPLETE"},
+            {"name":"ALPR Engine 5.0",  "size":"256 MB","progress":random.randint(10,70), "status":"DEPLOYING"},
         ]
 
-        jc1, jc2 = st.columns([1.2, 1])
+    @staticmethod
+    def alpr_lookup(plate: str):
+        random.seed(abs(hash(plate)) % (2**31))
+        fn = ["Arjun","Priya","Ravi","Sunita","Mohammed","Deepa","Kiran","Anjali"]
+        ln = ["Sharma","Patel","Kumar","Singh","Reddy","Nair","Iyer","Khan"]
+        flag = random.choices(["CLEAR","CLEAR","CLEAR","WARNING","CRITICAL"],weights=[50,20,10,15,5])[0]
+        fd   = {"CLEAR":"No outstanding issues.",
+                "WARNING":"Unpaid challan / traffic violation detected.",
+                "CRITICAL":"Vehicle reported STOLEN — contact law enforcement immediately."}
+        return {
+            "plate": plate.upper(),
+            "owner": f"{random.choice(fn)} {random.choice(ln)}",
+            "chassis": "MA3"+"".join(random.choices("ABCDEFGHJKLMNPRSTUVWXYZ0123456789",k=14)),
+            "insurer": random.choice(["HDFC Ergo","Bajaj Allianz","New India","Star Health","ICICI Lombard"]),
+            "valid_until": f"2025-{random.randint(1,12):02d}-{random.randint(1,28):02d}",
+            "flag": flag, "flag_detail": fd[flag],
+            "rto": random.choice(AegisData.CITIES),
+        }
 
-        with jc1:
-            st.components.v1.html(f"""
-            <!DOCTYPE html><html><head>
-            <style>
-            @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
-            *{{box-sizing:border-box;margin:0;padding:0;}}
-            body{{font-family:'Nunito',sans-serif;background:transparent;padding:8px 0;}}
-            .jarvis-card{{background:rgba(255,255,255,0.92);border:1px solid rgba(0,0,0,0.08);border-radius:20px;padding:22px 20px;box-shadow:0 2px 20px rgba(0,0,0,0.07);}}
-            .j-header{{display:flex;align-items:center;gap:12px;margin-bottom:18px;}}
-            .j-robo{{width:48px;height:48px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#5AC8FA,#007AFF 60%,#003A99);box-shadow:0 0 0 4px rgba(0,122,255,0.12),0 3px 12px rgba(0,122,255,0.3);display:flex;align-items:center;justify-content:center;animation:jpulse 2.5s ease-in-out infinite;flex-shrink:0;}}
-            @keyframes jpulse{{0%,100%{{box-shadow:0 0 0 4px rgba(0,122,255,0.12),0 3px 12px rgba(0,122,255,0.3);}}50%{{box-shadow:0 0 0 9px rgba(0,122,255,0.18),0 3px 22px rgba(0,122,255,0.45);}}}}
-            .j-title{{font-weight:800;font-size:1rem;color:#1C1C1E;}}.j-sub{{font-size:0.72rem;color:#8E8E93;margin-top:1px;}}
-            .touch-btn{{width:100%;padding:14px;border:none;border-radius:14px;cursor:pointer;font-family:'Nunito',sans-serif;font-weight:800;font-size:0.95rem;transition:all 0.2s;outline:none;background:linear-gradient(135deg,#007AFF,#0055CC);color:white;box-shadow:0 3px 14px rgba(0,122,255,0.35);display:flex;align-items:center;justify-content:center;gap:8px;}}
-            .touch-btn:hover{{transform:translateY(-2px);box-shadow:0 5px 20px rgba(0,122,255,0.45);}}
-            .touch-btn.listening{{background:linear-gradient(135deg,#34C759,#1A8A35);animation:lp 0.9s ease-in-out infinite;}}
-            .touch-btn.speaking{{background:linear-gradient(135deg,#5AC8FA,#007AFF);}}
-            @keyframes lp{{0%,100%{{opacity:1}}50%{{opacity:0.75}}}}
-            .status-row{{display:flex;align-items:center;gap:8px;margin:12px 0;padding:8px 14px;background:#F2F2F7;border-radius:10px;}}
-            .s-dot{{width:8px;height:8px;border-radius:50%;background:#C7C7CC;flex-shrink:0;}}
-            .s-dot.on-listen{{background:#34C759;animation:dp 0.8s ease-in-out infinite;}}
-            .s-dot.on-speak{{background:#007AFF;animation:dp 0.6s ease-in-out infinite;}}
-            .s-dot.on-think{{background:#FF9500;animation:dp 1s ease-in-out infinite;}}
-            @keyframes dp{{0%,100%{{opacity:1}}50%{{opacity:0.3}}}}
-            .s-label{{font-size:0.8rem;font-weight:600;color:#3A3A3C;}}
-            #transcript-box{{background:rgba(0,122,255,0.04);border:1px solid rgba(0,122,255,0.14);border-radius:12px;padding:11px 14px;font-size:0.84rem;color:#3A3A3C;font-style:italic;margin:10px 0;min-height:42px;line-height:1.5;}}
-            #response-box{{background:rgba(52,199,89,0.04);border:1px solid rgba(52,199,89,0.18);border-radius:12px;padding:13px 14px;font-size:0.86rem;color:#1C1C1E;font-weight:600;min-height:58px;line-height:1.6;margin:10px 0;}}
-            .btn-row2{{display:flex;gap:8px;margin-top:10px;}}
-            .mini-btn{{flex:1;padding:8px;border:1px solid #E5E5EA;border-radius:10px;background:#F2F2F7;color:#3A3A3C;font-family:'Nunito',sans-serif;font-weight:700;font-size:0.78rem;cursor:pointer;transition:all 0.18s;}}
-            .mini-btn:hover{{background:#E5E5EA;}}.mini-btn.red{{color:#FF3B30;border-color:rgba(255,59,48,0.3);}}
-            </style></head><body>
-            <div class="jarvis-card">
-              <div class="j-header">
-                <div class="j-robo">
-                  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect x="3" y="5" width="18" height="13" rx="3.5" fill="white" fill-opacity="0.95"/>
-                    <circle cx="8.5" cy="10" r="2" fill="#007AFF"/><circle cx="9.2" cy="9.3" r="0.65" fill="white"/>
-                    <circle cx="15.5" cy="10" r="2" fill="#007AFF"/><circle cx="16.2" cy="9.3" r="0.65" fill="white"/>
-                    <rect x="9.5" y="13.5" width="5" height="1.2" rx="0.6" fill="#34C759"/>
-                    <rect x="10.5" y="2.5" width="3" height="3" rx="1" fill="white" fill-opacity="0.7"/>
-                    <rect x="0.5" y="9" width="2.5" height="1.5" rx="0.75" fill="white" fill-opacity="0.5"/>
-                    <rect x="21" y="9" width="2.5" height="1.5" rx="0.75" fill="white" fill-opacity="0.5"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="j-title">Jarvis — Voice Intelligence</div>
-                  <div class="j-sub">Touch to speak &nbsp;·&nbsp; "Hello Jarvis" for full fleet briefing</div>
-                </div>
-              </div>
-              <button class="touch-btn" id="touchBtn" onclick="toggleListen()">
-                <span id="btnIcon">🎙️</span><span id="btnText">Touch to Speak</span>
-              </button>
-              <div class="status-row"><div class="s-dot" id="sDot"></div><div class="s-label" id="sLabel">Ready, Sir</div></div>
-              <div id="transcript-box">Your voice input will appear here...</div>
-              <div id="response-box">Awaiting your command, Sir.</div>
-              <div class="btn-row2">
-                <button class="mini-btn red" onclick="stopSpeaking()">⏹ Stop</button>
-                <button class="mini-btn" onclick="clearAll()">🗑 Clear</button>
-                <button class="mini-btn" onclick="sayFleetBrief()">📊 Fleet Brief</button>
-              </div>
-            </div>
-            <script>
-            const synth=window.speechSynthesis;let recognition=null,isListening=false;
-            const FSI={FSI};const N_HEALTHY={n_healthy},N_RISK={n_risk},N_CRITICAL={n_critical},N_EMERGENCY={n_emergency};
-            const WORST_VEH="{df.loc[df['safety_index'].idxmin(),'vehicle_id']}";
-            const BEST_DRV="{df.loc[df['driver_score'].idxmax(),'driver']}";
-            const WORST_DRV="{df.loc[df['driver_score'].idxmin(),'driver']}";
-            const LOW_BAT=`{', '.join(df[df['battery']<25]['vehicle_id'].tolist()) or 'None'}`;
-            const OVERDUE=`{', '.join(df[df['last_service_days']>150]['vehicle_id'].tolist()) or 'None'}`;
-            const HIGH_RISK_VEH="{df.loc[df['fail_prob'].idxmax(),'vehicle_id']}";
-            const HIGH_RISK_PROB={round(df['fail_prob'].max(),1)};
-            function getVoice(){{const vv=synth.getVoices();return vv.find(v=>v.name.includes('Daniel')||v.name.includes('Google UK')||v.name.includes('British'))||null;}}
-            function speak(text,rate=0.9,pitch=0.82){{synth.cancel();const u=new SpeechSynthesisUtterance(text);u.rate=rate;u.pitch=pitch;u.volume=1.0;const v=getVoice();if(v)u.voice=v;u.onstart=()=>setStatus("Speaking...","on-speak");u.onend=()=>{{setStatus("Ready, Sir","");setBtn("idle");}};synth.speak(u);setBtn("speaking");}}
-            function fleetBriefText(){{
-              const cond=FSI>=80?"running at peak efficiency, Sir. Splendid.":FSI>=60?"showing moderate stress. I am watching closely.":"in quite a concerning state. Immediate attention advised, Sir.";
-              let b=`Sir, here is your Aegis fleet briefing. Safety Index stands at ${{FSI}} out of 100. The fleet is ${{cond}} `;
-              b+=`We have ${{N_HEALTHY}} healthy, ${{N_RISK}} at risk, ${{N_CRITICAL}} critical`;
-              if(N_EMERGENCY>0)b+=`, and ${{N_EMERGENCY}} in emergency — which is frankly alarming`;b+=`. `;
-              if(LOW_BAT!=='None')b+=`Vehicles ${{LOW_BAT}} have low battery. `;
-              if(OVERDUE!=='None')b+=`${{OVERDUE}} overdue for service. `;
-              b+=`Best driver is ${{BEST_DRV}}. ${{HIGH_RISK_VEH}} carries ${{HIGH_RISK_PROB}}% failure risk. That concludes your briefing, Sir.`;
-              return b;
-            }}
-            function sayFleetBrief(){{const t=fleetBriefText();document.getElementById('response-box').innerText=t;speak(t,0.88,0.8);}}
-            function processCommand(cmd){{
-              setStatus("Processing...","on-think");let r='';
-              if(cmd.match(/hello|hi jarvis|hey jarvis|good morning|good evening|jarvis/))r=fleetBriefText();
-              else if(cmd.match(/fleet status|overall|fleet health/))r=fleetBriefText();
-              else if(cmd.match(/critical|dangerous|worst vehicle|urgent/)){{const c=N_CRITICAL+N_EMERGENCY;r=c===0?"No critical vehicles, Sir.":`${{c}} vehicle${{c>1?'s are':' is'}} demanding attention. ${{WORST_VEH}} is the most concerning.`;}}
-              else if(cmd.match(/emergency/))r=N_EMERGENCY===0?"No emergencies, Sir.":`${{N_EMERGENCY}} in emergency status. Act immediately, Sir!`;
-              else if(cmd.match(/best driver|top driver|leaderboard/))r=`${{BEST_DRV}} leads the leaderboard, Sir. ${{WORST_DRV}} needs coaching.`;
-              else if(cmd.match(/battery|charge|low power/))r=LOW_BAT==='None'?"All batteries adequate, Sir.":`Vehicles ${{LOW_BAT}} are low, Sir.`;
-              else if(cmd.match(/maintenance|service|overdue/))r=OVERDUE==='None'?"All within service intervals.":`${{OVERDUE}} overdue for service.`;
-              else if(cmd.match(/safety index|safety score/))r=`Fleet Safety Index is ${{FSI}} out of 100.`;
-              else if(cmd.match(/failure|risk|breakdown/))r=`${{HIGH_RISK_VEH}} carries ${{HIGH_RISK_PROB}}% failure risk, Sir.`;
-              else if(cmd.match(/thank/))r="You are most welcome, Sir.";
-              else r="I did not catch that, Sir. Try: Hello Jarvis, Fleet status, Battery report, or Best driver.";
-              document.getElementById('response-box').innerText=r;speak(r);
-            }}
-            function initRecognition(){{
-              if(!('webkitSpeechRecognition' in window)&&!('SpeechRecognition' in window)){{setStatus("Voice not supported — use Chrome","");return null;}}
-              const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-              const rec=new SR();rec.continuous=false;rec.interimResults=true;rec.lang='en-US';
-              rec.onstart=()=>{{setStatus("Listening, Sir...","on-listen");setBtn("listening");}};
-              rec.onresult=(e)=>{{let interim='',final='';for(let i=e.resultIndex;i<e.results.length;i++){{if(e.results[i].isFinal)final+=e.results[i][0].transcript;else interim+=e.results[i][0].transcript;}}document.getElementById('transcript-box').innerText=(final||interim)||'...';if(final)processCommand(final.toLowerCase().trim());}};
-              rec.onerror=(e)=>{{setStatus("Error: "+e.error,"");resetBtn();}};rec.onend=()=>{{isListening=false;resetBtn();}};return rec;
-            }}
-            function toggleListen(){{if(isListening){{recognition.stop();return;}}recognition=initRecognition();if(!recognition)return;isListening=true;recognition.start();}}
-            function setBtn(state){{const btn=document.getElementById('touchBtn'),icon=document.getElementById('btnIcon'),txt=document.getElementById('btnText');btn.className='touch-btn';if(state==='listening'){{btn.classList.add('listening');icon.innerText='🔴';txt.innerText='Listening...';}}else if(state==='speaking'){{btn.classList.add('speaking');icon.innerText='🔊';txt.innerText='Speaking...';}}else{{icon.innerText='🎙️';txt.innerText='Touch to Speak';}}}}
-            function resetBtn(){{isListening=false;setBtn('idle');setStatus("Ready, Sir","");}}
-            function stopSpeaking(){{synth.cancel();setStatus("Ready, Sir","");setBtn('idle');}}
-            function clearAll(){{synth.cancel();document.getElementById('transcript-box').innerText='Your voice input will appear here...';document.getElementById('response-box').innerText='Awaiting your command, Sir.';setStatus("Ready, Sir","");setBtn('idle');}}
-            function setStatus(msg,cls){{document.getElementById('sLabel').innerText=msg;const d=document.getElementById('sDot');d.className='s-dot'+(cls?' '+cls:'');}}
-            speechSynthesis.onvoiceschanged=()=>speechSynthesis.getVoices();
-            </script></body></html>
-            """, height=440)
+    @staticmethod
+    def route_history(vehicle_id: str):
+        random.seed(abs(hash(vehicle_id)) % 9999)
+        city = random.choice(AegisData.CITIES)
+        base_lat, base_lon = AegisData.CITY_COORDS[city]
+        n    = 25
+        lats = [base_lat + random.uniform(-0.08, 0.08) for _ in range(n)]
+        lons = [base_lon + random.uniform(-0.08, 0.08) for _ in range(n)]
+        lats = [sum(lats[max(0,i-2):i+3])/len(lats[max(0,i-2):i+3]) for i in range(n)]
+        lons = [sum(lons[max(0,i-2):i+3])/len(lons[max(0,i-2):i+3]) for i in range(n)]
+        ts_list  = [datetime.datetime.now()-datetime.timedelta(minutes=(n-i)*4) for i in range(n)]
+        soc_vals = list(np.clip(np.cumsum([-random.uniform(0,1.5) for _ in range(n)])+85, 10, 100).round(1))
+        return pd.DataFrame({
+            "lat": lats, "lon": lons,
+            "timestamp": [t.strftime("%H:%M") for t in ts_list],
+            "speed_kmh": [random.randint(0, 100) for _ in range(n)],
+            "soc_%":     soc_vals,
+            "city":      city,
+        })
 
-        with jc2:
-            st.markdown("""<div class="apple-card" style="margin-bottom:12px;">
-                <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:14px;">🎙️ Voice Commands</div>
-            """, unsafe_allow_html=True)
-            for cmd, desc in jarvis_commands:
-                st.markdown(f"""
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #F2F2F7;">
-                    <div>
-                        <div style="font-size:0.82rem;font-weight:600;color:#1C1C1E;">"{cmd}"</div>
-                        <div style="font-size:0.72rem;color:#8E8E93;margin-top:1px;">{desc}</div>
-                    </div>
-                    <div style="font-size:0.7rem;background:rgba(0,122,255,0.08);color:#007AFF;padding:3px 9px;border-radius:8px;font-weight:600;white-space:nowrap;margin-left:8px;">Say it</div>
-                </div>""", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown(f"""
-            <div class="apple-card">
-                <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:14px;">⚡ Live Fleet Briefing</div>
-                <div style="font-size:0.82rem;color:#3A3A3C;line-height:1.8;">
-                    <div>🚗 <b>Fleet:</b> {len(df)} vehicles online</div>
-                    <div>📊 <b>Safety Index:</b> <span style="color:{fsi_color};font-weight:700;">{FSI}/100</span></div>
-                    <div>✅ <b>Healthy:</b> {n_healthy} &nbsp;|&nbsp; ⚠️ <b>At Risk:</b> {n_risk}</div>
-                    <div>🔴 <b>Critical:</b> {n_critical} &nbsp;|&nbsp; 🆘 <b>Emergency:</b> {n_emergency}</div>
-                    <div>🏆 <b>Best Driver:</b> {df.loc[df['driver_score'].idxmax(),'driver']}</div>
-                    <div>⚡ <b>Low Battery:</b> {len(df[df['battery']<25])} vehicle(s)</div>
-                    <div>🔧 <b>Overdue Service:</b> {len(df[df['last_service_days']>150])} vehicle(s)</div>
-                </div>
-            </div>
-            <div class="apple-card" style="margin-top:0;">
-                <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px;">ℹ️ How It Works</div>
-                <div style="font-size:0.77rem;color:#8E8E93;line-height:1.7;">
-                    • Touch the button and speak your command<br>
-                    • Say <b style="color:#007AFF;">"Hello Jarvis"</b> for full auto briefing<br>
-                    • <b>No API keys</b> — works on any device<br>
-                    • Responses spoken aloud in Jarvis voice<br>
-                    • Works best in <b>Chrome or Edge</b>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
 
-    # ═══════════════════════════════════════
-    #  SPECIAL MODE — Hand Gesture (Pure OpenCV, no mediapipe solutions needed)
-    # ═══════════════════════════════════════
-    else:
-        import cv2
+# =============================================================================
+#  CLASS: AegisHardware
+# =============================================================================
+class AegisHardware:
 
-        gc1, gc2 = st.columns([1.3, 1])
+    # ── GESTURE SECURITY — Fixed for mediapipe v0.10+ ────────────────────────
+    @staticmethod
+    def gesture_terminal():
+        AegisUI.header("✋ GESTURE SECURITY", "BIOMETRIC HAND-VECTOR AUTHENTICATION")
 
-        with gc1:
-            st.markdown("""
-            <div class="apple-card" style="margin-bottom:16px;">
-              <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
-                <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#34C759,#1A8A35);
-                    display:flex;align-items:center;justify-content:center;font-size:1.5rem;
-                    box-shadow:0 0 0 4px rgba(52,199,89,0.15),0 3px 12px rgba(52,199,89,0.3);">🤟</div>
-                <div>
-                  <div style="font-weight:800;font-size:1rem;color:#1C1C1E;">Hand Gesture Control</div>
-                  <div style="font-size:0.72rem;color:#8E8E93;margin-top:1px;">Camera-based · No speech needed · Pure OpenCV finger detection</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+        if not CV2_AVAILABLE or not MP_AVAILABLE:
+            missing = "OpenCV" if not CV2_AVAILABLE else "MediaPipe"
+            st.warning(f"⚠️  {missing} not installed — running in simulation mode.")
+            AegisHardware._gesture_simulation()
+            return
 
-            # ── Pure OpenCV finger counting — skin color + convex hull ──
-            # No mediapipe, no model file, works on ANY version installed
-            def get_skin_mask(frame):
-                hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                ycr  = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-                m1 = cv2.inRange(hsv, (0,15,60),  (20,170,255))
-                m2 = cv2.inRange(ycr, (0,133,77), (255,173,127))
-                mask = cv2.bitwise_and(m1, m2)
-                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=2)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=3)
-                mask = cv2.GaussianBlur(mask, (5,5), 0)
-                return mask
+        if not MP_LEGACY_API:
+            st.warning(
+                "⚠️  **MediaPipe `mp.solutions.hands` not found.**\n\n"
+                "Your MediaPipe version (0.10.4+) removed the legacy `solutions` API.\n\n"
+                "**Fix:** `pip install mediapipe==0.10.3`\n\n"
+                "Showing simulation mode in the meantime."
+            )
+            AegisHardware._gesture_simulation()
+            return
 
-            def count_fingers_opencv(frame):
-                """Returns (finger_count, annotated_frame, found_hand)"""
-                h, w = frame.shape[:2]
-                # Focus on right side of frame (where hand usually is)
-                roi = frame[60:h-20, w//4:]
-                mask = get_skin_mask(roi)
-                cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if not cnts:
-                    return 0, frame, False
-                cnt = max(cnts, key=cv2.contourArea)
-                if cv2.contourArea(cnt) < 4000:
-                    return 0, frame, False
-                # Draw contour on frame
-                cnt_shifted = cnt + np.array([w//4, 60])
-                cv2.drawContours(frame, [cnt_shifted], -1, (0,122,255), 2)
-                # Convex hull + defects for finger counting
-                hull_idx = cv2.convexHull(cnt, returnPoints=False)
-                if hull_idx is None or len(hull_idx) < 3:
-                    return 0, frame, True
-                try:
-                    defects = cv2.convexityDefects(cnt, hull_idx)
-                except:
-                    return 0, frame, True
-                if defects is None:
-                    return 1, frame, True
-                finger_count = 1
-                for i in range(defects.shape[0]):
-                    s,e,f,d = defects[i,0]
-                    start  = tuple(cnt[s][0] + np.array([w//4, 60]))
-                    end    = tuple(cnt[e][0] + np.array([w//4, 60]))
-                    far    = tuple(cnt[f][0] + np.array([w//4, 60]))
-                    # Angle at defect point
-                    a = np.array(start, dtype=float) - np.array(far, dtype=float)
-                    b = np.array(end,   dtype=float) - np.array(far, dtype=float)
-                    angle = np.degrees(np.arccos(
-                        np.clip(np.dot(a,b)/(np.linalg.norm(a)*np.linalg.norm(b)+1e-6), -1, 1)
-                    ))
-                    # Valid finger gap: angle < 90°, defect depth > threshold
-                    if angle < 88 and d > 8000:
-                        finger_count += 1
-                        cv2.circle(frame, far,   6, (255,100,0), -1)
-                        cv2.circle(frame, start, 4, (52,199,89), -1)
-                        cv2.circle(frame, end,   4, (52,199,89), -1)
-                finger_count = min(finger_count, 5)
-                return finger_count, frame, True
+        st.info("📷 Camera access required. Check the box below to begin.")
+        run          = st.checkbox("🟢 Start Gesture Scan", key="gesture_run")
+        FRAME_WINDOW = st.empty()
+        status_box   = st.empty()
 
-            def classify_by_count(n):
-                if n == 0: return "fist",  "✊ Fist (0)",        "Stop / Clear"
-                if n == 1: return "one",   "☝️ 1 Finger",       "Emergency Alert"
-                if n == 2: return "two",   "✌️ 2 Fingers",      "Battery Report"
-                if n == 3: return "three", "🤟 3 Fingers",       "Best Driver"
-                if n == 4: return "four",  "🖖 4 Fingers",       "Maintenance Alert"
-                if n == 5: return "open",  "✋ Open Hand (5)",   "Fleet Status Briefing"
-                return "unknown","🖐 Other","Unrecognised"
+        if run:
+            try:
+                mp_hands = mp.solutions.hands       # safe — MP_LEGACY_API is True here
+                mp_draw  = mp.solutions.drawing_utils
 
-            _low_bat_str = ', '.join(df[df['battery']<25]['vehicle_id'].tolist()) or 'None'
-            _overdue_str = ', '.join(df[df['last_service_days']>150]['vehicle_id'].tolist()) or 'None'
-            _best_drv_g  = df.loc[df['driver_score'].idxmax(),'driver']
-
-            def get_response(key):
-                return {
-                    "open":  f"Fleet briefing: Safety Index {FSI}/100. {n_healthy} healthy, {n_risk} at risk, {n_critical} critical, {n_emergency} emergency.",
-                    "one":   f"EMERGENCY! {n_emergency} vehicle(s) need immediate help!" if n_emergency>0 else "No emergencies right now, Sir.",
-                    "two":   f"Low battery vehicles: {_low_bat_str}." if _low_bat_str!='None' else "All batteries adequate, Sir.",
-                    "three": f"{_best_drv_g} leads the driver leaderboard, Sir.",
-                    "four":  f"Overdue service: {_overdue_str}." if _overdue_str!='None' else "All vehicles within service intervals.",
-                    "fist":  "Display cleared, Sir.",
-                }.get(key, "Gesture not recognised, Sir.")
-
-            # ── Camera controls ──
-            if "gesture_running" not in st.session_state: st.session_state.gesture_running = False
-            if "gesture_result"  not in st.session_state: st.session_state.gesture_result  = None
-
-            cam_col1, cam_col2 = st.columns(2)
-            with cam_col1:
-                if st.button("📷 Turn Camera ON",  key="cam_on",  use_container_width=True):
-                    st.session_state.gesture_running = True
-                    st.session_state.gesture_result  = None
-            with cam_col2:
-                if st.button("⏹ Turn Camera OFF", key="cam_off", use_container_width=True):
-                    st.session_state.gesture_running = False
-
-            cam_status = "🟢 Camera Active — Show your hand in good light" if st.session_state.gesture_running else "⚫ Camera Off — Press Turn Camera ON"
-            st.markdown(f'<div style="background:#F2F2F7;border-radius:10px;padding:10px 16px;margin:10px 0;font-size:0.82rem;font-weight:600;color:#3A3A3C;">{cam_status}</div>', unsafe_allow_html=True)
-
-            FRAME_WINDOW     = st.empty()
-            gesture_display  = st.empty()
-            response_display = st.empty()
-
-            if st.session_state.gesture_running:
                 cap = cv2.VideoCapture(0)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
-                hold_counts    = {}
-                CONFIRM_FRAMES = 20
-                last_confirmed = None
-                frame_count    = 0
-                try:
-                    while st.session_state.gesture_running and frame_count < 500:
-                        ret, frame = cap.read()
-                        if not ret: break
-                        frame = cv2.flip(frame, 1)
+                if not cap.isOpened():
+                    st.error("❌ Camera not found — switching to simulation.")
+                    AegisHardware._gesture_simulation()
+                    return
 
-                        n_fingers, frame, found = count_fingers_opencv(frame)
-                        gkey, glabel, gaction = classify_by_count(n_fingers) if found else ("unknown","No hand detected","—")
+                detector     = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
+                                               min_detection_confidence=0.7)
+                frame_count  = 0
+                access_ok    = False
 
-                        if found and gkey != "unknown":
-                            hold_counts[gkey] = hold_counts.get(gkey, 0) + 1
-                            for k in list(hold_counts):
-                                if k != gkey: hold_counts[k] = 0
-                            pct = min(int(hold_counts[gkey] / CONFIRM_FRAMES * 100), 100)
-                        else:
-                            hold_counts = {}
-                            pct = 0
+                while st.session_state.get("gesture_run", False):
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    result = detector.process(rgb)
 
-                        # Draw HUD overlay
-                        ov = frame.copy()
-                        cv2.rectangle(ov, (0,0), (frame.shape[1], 76), (20,20,24), -1)
-                        cv2.addWeighted(ov, 0.72, frame, 0.28, 0, frame)
-                        cv2.putText(frame, f"{glabel}  ->  {gaction}", (10,27), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2)
-                        bw = int((frame.shape[1]-20) * pct / 100)
-                        cv2.rectangle(frame, (10,40), (10+bw, 56), (52,199,89), -1)
-                        cv2.rectangle(frame, (10,40), (frame.shape[1]-10, 56), (80,80,80), 1)
-                        cv2.putText(frame, f"Hold: {pct}%", (10,72), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180,180,180), 1)
-                        cv2.putText(frame, f"Fingers: {n_fingers}", (frame.shape[1]-130,27), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,200,0), 2)
+                    if result.multi_hand_landmarks:
+                        for hl in result.multi_hand_landmarks:
+                            mp_draw.draw_landmarks(rgb, hl, mp_hands.HAND_CONNECTIONS)
+                        if not access_ok:
+                            access_ok = True
+                            status_box.success("🔓 ACCESS GRANTED — Hand biometric verified!")
+                    else:
+                        status_box.info("🔍 Scanning… show your hand to the camera.")
+                        access_ok = False
 
-                        # Confirm gesture when held long enough
-                        if found and hold_counts.get(gkey,0) >= CONFIRM_FRAMES and gkey != last_confirmed and gkey != "unknown":
-                            last_confirmed = gkey
-                            st.session_state.gesture_result = {
-                                "key": gkey, "label": glabel,
-                                "action": gaction, "response": get_response(gkey)
-                            }
-                            hold_counts = {}
+                    FRAME_WINDOW.image(rgb, channels="RGB", use_container_width=True)
+                    frame_count += 1
+                    if frame_count > 300:
+                        break
 
-                        FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
+                cap.release()
+                detector.close()
+            except Exception as exc:
+                st.error(f"Gesture module error: {exc}")
+                AegisHardware._gesture_simulation()
 
-                        if st.session_state.gesture_result:
-                            r = st.session_state.gesture_result
-                            gesture_display.markdown(
-                                f'<div style="background:rgba(52,199,89,0.08);border:1px solid rgba(52,199,89,0.25);border-radius:12px;padding:10px 14px;margin:8px 0;">'
-                                f'<b style="color:#1A7A33;">✅ Confirmed: {r["label"]}</b><br>'
-                                f'<span style="font-size:0.78rem;color:#3A3A3C;">{r["action"]}</span></div>',
-                                unsafe_allow_html=True)
-                            response_display.markdown(
-                                f'<div style="background:rgba(0,122,255,0.05);border:1px solid rgba(0,122,255,0.18);border-radius:12px;padding:12px 14px;font-size:0.86rem;font-weight:600;color:#1C1C1E;">'
-                                f'🤖 {r["response"]}</div>',
-                                unsafe_allow_html=True)
-                        frame_count += 1
+    @staticmethod
+    def _gesture_simulation():
+        st.markdown("""
+        <div style="background:rgba(0,210,255,0.06);border:1px solid rgba(0,210,255,0.3);
+             border-radius:10px;padding:1.5rem;text-align:center;">
+            <div style="font-size:5rem">🖐️</div>
+            <div style="color:#00d2ff;font-family:Syncopate,sans-serif;
+                        letter-spacing:4px;margin-top:.5rem;">SIMULATION MODE</div>
+            <div style="color:#aaa;font-size:.8rem;margin-top:.4rem;">
+                21-point MediaPipe hand skeleton — simulated landmarks
+            </div>
+        </div>""", unsafe_allow_html=True)
 
-                except Exception as cam_err:
-                    st.error(f"Camera error: {cam_err}")
-                finally:
-                    cap.release()
-                st.session_state.gesture_running = False
-                st.rerun()
+        lm_names = ["WRIST","THUMB_CMC","THUMB_MCP","THUMB_IP","THUMB_TIP",
+                    "INDEX_MCP","INDEX_PIP","INDEX_DIP","INDEX_TIP",
+                    "MIDDLE_MCP","MIDDLE_PIP","MIDDLE_DIP","MIDDLE_TIP"]
+        cols = st.columns(4)
+        for i, lm in enumerate(lm_names):
+            x = round(random.uniform(0.15, 0.85), 3)
+            y = round(random.uniform(0.10, 0.90), 3)
+            z = round(random.uniform(-0.12, 0.12), 3)
+            cols[i % 4].metric(lm, f"({x},{y})", f"z={z}")
 
-            elif st.session_state.gesture_result:
-                r = st.session_state.gesture_result
-                gesture_display.markdown(
-                    f'<div style="background:rgba(52,199,89,0.08);border:1px solid rgba(52,199,89,0.25);border-radius:12px;padding:10px 14px;margin:8px 0;">'
-                    f'<b style="color:#1A7A33;">✅ Last Gesture: {r["label"]}</b><br>'
-                    f'<span style="font-size:0.78rem;color:#3A3A3C;">{r["action"]}</span></div>',
-                    unsafe_allow_html=True)
-                response_display.markdown(
-                    f'<div style="background:rgba(0,122,255,0.05);border:1px solid rgba(0,122,255,0.18);border-radius:12px;padding:12px 14px;font-size:0.86rem;font-weight:600;color:#1C1C1E;">'
-                    f'🤖 {r["response"]}</div>',
-                    unsafe_allow_html=True)
+        # Simulated skeleton scatter
+        n_lm = 21
+        lx = [random.uniform(0.2, 0.8) for _ in range(n_lm)]
+        ly = [random.uniform(0.1, 0.9) for _ in range(n_lm)]
+        fig = go.Figure()
+        connections = [(0,1),(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),
+                       (0,9),(9,10),(10,11),(11,12),(0,13),(13,14),(14,15),(15,16),
+                       (0,17),(17,18),(18,19),(19,20),(5,9),(9,13),(13,17)]
+        for a, b in connections:
+            fig.add_trace(go.Scatter(x=[lx[a],lx[b]], y=[ly[a],ly[b]], mode="lines",
+                                     line=dict(color="rgba(0,210,255,0.4)",width=2),
+                                     showlegend=False))
+        fig.add_trace(go.Scatter(x=lx, y=ly, mode="markers+text",
+                                  marker=dict(size=10, color="#ff00c1",
+                                              line=dict(color="#00d2ff",width=1)),
+                                  text=[str(i) for i in range(n_lm)],
+                                  textposition="top center",
+                                  textfont=dict(size=8, color="#a0ffcc"),
+                                  name="Landmarks"))
+        AegisUI.dark_fig(fig, "HAND LANDMARK SKELETON — SIMULATED")
+        fig.update_layout(height=320,
+                          xaxis=dict(range=[0,1], showticklabels=False),
+                          yaxis=dict(range=[0,1], showticklabels=False, autorange="reversed"))
+        st.plotly_chart(fig, use_container_width=True)
+        st.success(f"✅ SIMULATED ACCESS GRANTED | Hand: {random.choice(['Right','Left'])} "
+                   f"| Confidence: {round(random.uniform(95,99.5),1)}%")
 
-        with gc2:
-            st.markdown("""
-            <div class="apple-card" style="margin-bottom:12px;">
-              <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:14px;">🤟 Gesture Commands</div>
-            """, unsafe_allow_html=True)
-            gestures = [
-                ("✋", "Open Hand (5 fingers)", "Fleet Status Briefing", "#007AFF"),
-                ("☝️", "One Finger (index)", "Emergency Alert", "#FF3B30"),
-                ("✌️", "Two Fingers", "Battery Report", "#FF9500"),
-                ("🤟", "Three Fingers", "Best Driver", "#34C759"),
-                ("🖖", "Four Fingers", "Maintenance Alert", "#007AFF"),
-                ("🤙", "Shaka (thumb + pinky)", "Safety Index", "#5AC8FA"),
-                ("✊", "Fist (0 fingers)", "Stop / Clear", "#8E8E93"),
-            ]
-            for icon, label, action, color in gestures:
-                st.markdown(f"""
-                <div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #F2F2F7;">
-                    <div style="font-size:1.4rem;min-width:32px;text-align:center;">{icon}</div>
-                    <div style="flex:1;">
-                        <div style="font-size:0.82rem;font-weight:700;color:#1C1C1E;">{label}</div>
-                        <div style="font-size:0.72rem;color:#8E8E93;margin-top:1px;">{action}</div>
-                    </div>
-                    <div style="font-size:0.68rem;background:rgba(0,0,0,0.04);color:{color};
-                        padding:3px 8px;border-radius:8px;font-weight:700;white-space:nowrap;
-                        border:1px solid rgba(0,0,0,0.06);">Hold 1s</div>
-                </div>""", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+    # ── VOICE ASSISTANT ──────────────────────────────────────────────────────
+    @staticmethod
+    def voice_terminal():
+        AegisUI.header("🎙️ VOICE ASSISTANT", "JARVIS — NEURAL LANGUAGE INTERFACE")
+        queries = ["Fleet status report","Battery health overview","Active vehicle count",
+                   "Cyber threat level","Latest OTA updates"]
+        responses = {
+            "Fleet status report":     "All 20 EVs online. 10 active, 5 idle, 3 charging, 2 alert.",
+            "Battery health overview": "Avg SOC 68%. Three vehicles below 20% threshold.",
+            "Active vehicle count":    "10 vehicles in active transit across 6 metros.",
+            "Cyber threat level":      "ORANGE threat level. 3 intrusion attempts blocked.",
+            "Latest OTA updates":      "Kernel v4.7.2 at 83%. BMS Firmware 3.1 complete.",
+        }
+        sel_q    = st.selectbox("🗣️ Select Query:", queries)
+        custom_q = st.text_input("Custom query:", placeholder="Ask AEGIS anything…")
+        active_q = custom_q.strip() if custom_q.strip() else sel_q
 
+        if st.button("🔴 TRANSMIT"):
+            resp = responses.get(active_q, f"Query '{active_q}' processed. All systems nominal.")
             st.markdown(f"""
-            <div class="apple-card">
-              <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:12px;">⚡ Live Fleet Status</div>
-              <div style="font-size:0.82rem;color:#3A3A3C;line-height:1.8;">
-                <div>🚗 <b>Fleet:</b> {len(df)} vehicles</div>
-                <div>📊 <b>Safety Index:</b> <span style="color:{fsi_color};font-weight:700;">{FSI}/100</span></div>
-                <div>✅ {n_healthy} Healthy &nbsp;|&nbsp; ⚠️ {n_risk} At Risk</div>
-                <div>🔴 {n_critical} Critical &nbsp;|&nbsp; 🆘 {n_emergency} Emergency</div>
-              </div>
-            </div>
-            <div class="apple-card" style="margin-top:0;">
-              <div style="font-size:0.68rem;font-weight:700;color:#8E8E93;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px;">ℹ️ How to Use</div>
-              <div style="font-size:0.77rem;color:#8E8E93;line-height:1.8;">
-                1. Click <b style="color:#34C759;">Turn Camera ON</b><br>
-                2. Hold your hand clearly in front of camera<br>
-                3. <b>Hold the gesture for ~1 second</b> to confirm<br>
-                4. Jarvis reads the result aloud<br>
-                5. Works with <b>MediaPipe + OpenCV</b><br>
-                6. No ML training — pure hand landmark detection
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            <div class="log-block">
+                <span style="color:#00d2ff;">▶ USER:</span> {active_q}<br>
+                <span style="color:#00ff9f;">◀ JARVIS:</span> {resp}
+            </div>""", unsafe_allow_html=True)
+            if GTTS_AVAILABLE:
+                try:
+                    tts = gTTS(text=resp, lang='en', slow=False)
+                    buf = io.BytesIO()
+                    tts.write_to_fp(buf); buf.seek(0)
+                    a64 = base64.b64encode(buf.read()).decode()
+                    st.markdown(f'<audio controls autoplay>'
+                                f'<source src="data:audio/mp3;base64,{a64}" type="audio/mp3">'
+                                f'</audio>', unsafe_allow_html=True)
+                except Exception:
+                    st.caption("_Audio synthesis unavailable._")
+            else:
+                st.caption("_gTTS not installed — text-only mode._")
 
-# ─────────────────────────────────────────────
-#  FOOTER  (FIX 3: 2026)
-# ─────────────────────────────────────────────
-st.divider()
-st.markdown("""
-<div style="text-align:center;padding:16px 0 8px;color:#C7C7CC;font-size:0.75rem;font-weight:500;letter-spacing:0.04em;">
-    Aegis · EV Safety Intelligence Platform &nbsp;·&nbsp; VIT Smart Mobility Competition 2026 &nbsp;·&nbsp; Team Aegis
-</div>
-""", unsafe_allow_html=True)
+        st.markdown("#### 📜 SESSION LOG")
+        hist = [("Fleet status report","10 active, 5 idle, 3 charging, 2 alert.","09:14:02"),
+                ("Battery health overview","Avg SOC 68%. 3 below threshold.","09:14:45"),
+                ("Cyber threat level","ORANGE — 3 intrusion attempts blocked.","09:15:22")]
+        log_html = '<div class="log-block">'
+        for q, a, t in hist:
+            log_html += f'[{t}] <span style="color:#00d2ff;">USER:</span> {q}<br>'
+            log_html += f'[{t}] <span style="color:#00ff9f;">JARVIS:</span> {a}<br><br>'
+        log_html += '</div>'
+        st.markdown(log_html, unsafe_allow_html=True)
+
+
+# =============================================================================
+#  TERMINAL FUNCTIONS
+# =============================================================================
+
+def terminal_command_overview():
+    AegisUI.header("⚡ COMMAND OVERVIEW", "GLOBAL FLEET INTELLIGENCE MATRIX")
+    df = AegisData.fleet_snapshot()
+    c1,c2,c3,c4,c5 = st.columns(5)
+    AegisUI.metric_card(c1,"ACTIVE ASSETS", str(int((df.status=="ACTIVE").sum())),f"+{random.randint(0,3)} vs yesterday",True)
+    AegisUI.metric_card(c2,"AVG SOC %",f"{df.soc.mean():.1f}","▲ 2.3%",True)
+    AegisUI.metric_card(c3,"LATENCY",f"{random.randint(12,48)}ms","▼ 4ms",True)
+    AegisUI.metric_card(c4,"ALERTS OPEN",str(int((df.status=="ALERT").sum())),"⚠",False)
+    AegisUI.metric_card(c5,"FLEET LOAD",f"{random.randint(55,85)}%","▲ 1.1%",True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    cmap = {"ACTIVE":"#00d2ff","IDLE":"#a0b0d0","CHARGING":"#00ff9f","ALERT":"#ff00c1"}
+    col_map, col_right = st.columns([3,2])
+    with col_map:
+        fig = px.scatter_mapbox(df, lat="lat", lon="lon", color="status",
+                                color_discrete_map=cmap, hover_name="vehicle",
+                                hover_data={"soc":True,"speed_kmh":True,"temp_c":True,"lat":False,"lon":False},
+                                size="soc", size_max=16, zoom=4,
+                                center={"lat":20.5,"lon":80}, mapbox_style="carto-darkmatter")
+        AegisUI.dark_fig(fig,"EV FLEET MAP — LIVE POSITIONS")
+        fig.update_layout(height=420, margin=dict(l=0,r=0,t=40,b=0))
+        st.plotly_chart(fig, use_container_width=True)
+    with col_right:
+        sc = df.status.value_counts().reset_index(); sc.columns=["status","count"]
+        fig2 = px.pie(sc, names="status", values="count", color="status",
+                      color_discrete_map=cmap, hole=0.55)
+        AegisUI.dark_fig(fig2,"STATUS DISTRIBUTION")
+        fig2.update_traces(textfont=dict(color="white"))
+        st.plotly_chart(fig2, use_container_width=True)
+        fig3 = px.histogram(df, x="soc", nbins=10, title="SOC DISTRIBUTION",
+                             color_discrete_sequence=["#00d2ff"])
+        AegisUI.dark_fig(fig3)
+        fig3.update_layout(height=220, margin=dict(l=20,r=10,t=35,b=20))
+        st.plotly_chart(fig3, use_container_width=True)
+    st.markdown("#### FLEET TABLE")
+    st.dataframe(df.style.applymap(
+        lambda v: f"color: {'#00ff9f' if v=='ACTIVE' else '#ff00c1' if v=='ALERT' else '#a0b0d0'}",
+        subset=["status"]), use_container_width=True, height=260)
+
+
+def terminal_predictive_health():
+    AegisUI.header("🔬 PREDICTIVE HEALTH","RUL ENGINE — COMPONENT STRESS ANALYTICS")
+    rul_df   = AegisData.rul_data()
+    comps    = rul_df.component.unique().tolist()
+    selected = st.multiselect("Select components:", comps, default=comps[:3])
+    filtered = rul_df[rul_df.component.isin(selected)] if selected else rul_df
+
+    fig = px.line(filtered, x="day", y="health_%", color="component",
+                  color_discrete_sequence=px.colors.qualitative.Bold)
+    fig.add_hline(y=30, line_dash="dash", line_color="#ff00c1",
+                  annotation_text="CRITICAL (30%)", annotation_font_color="#ff00c1")
+    fig.add_hline(y=60, line_dash="dot",  line_color="#ffdd57",
+                  annotation_text="WARNING (60%)",  annotation_font_color="#ffdd57")
+    AegisUI.dark_fig(fig,"COMPONENT HEALTH DEGRADATION — 365-DAY RUL")
+    fig.update_layout(height=380)
+    st.plotly_chart(fig, use_container_width=True)
+
+    c1,c2 = st.columns(2)
+    latest = rul_df.groupby("component")["health_%"].last().reset_index()
+    fig_b  = px.bar(latest, x="component", y="health_%", color="health_%",
+                    color_continuous_scale=["#ff00c1","#ffdd57","#00ff9f"],
+                    title="CURRENT HEALTH SNAPSHOT")
+    AegisUI.dark_fig(fig_b)
+    c1.plotly_chart(fig_b, use_container_width=True)
+
+    if SCIPY_AVAILABLE and comps:
+        vals  = rul_df[rul_df.component==comps[0]]["health_%"].values
+        kde_x = np.linspace(vals.min(), vals.max(), 200)
+        kde   = stats.gaussian_kde(vals)
+        fk    = go.Figure()
+        fk.add_trace(go.Scatter(x=kde_x, y=kde(kde_x), fill="tozeroy",
+                                line_color="#00d2ff", name="KDE"))
+        AegisUI.dark_fig(fk, f"HEALTH KDE — {comps[0]}")
+        c2.plotly_chart(fk, use_container_width=True)
+    else:
+        c2.info("SciPy not installed — KDE unavailable.")
+
+
+def terminal_financial_risk():
+    AegisUI.header("💹 FINANCIAL RISK AI","ROI MODELLING & EXPOSURE ANALYTICS")
+    c1,c2 = st.columns([1,2])
+    with c1:
+        fleet_size  = st.slider("Fleet Size",5,500,100)
+        avg_km_day  = st.slider("Avg KM/day",50,500,200)
+        fuel_saving = st.slider("Fuel saving $/km",0.05,0.30,0.12,0.01)
+        ops_cost    = st.slider("Ops cost $/veh/day",5.0,50.0,18.0,0.5)
+        risk_mult   = st.slider("Risk Multiplier",0.5,3.0,1.2,0.1)
+        years       = st.slider("Projection Years",1,10,5)
+    annual_saving = fleet_size*avg_km_day*fuel_saving*365
+    annual_cost   = fleet_size*ops_cost*365
+    net_annual    = annual_saving-annual_cost
+    roi_pct       = (net_annual/max(fleet_size*800000,1))*100
+    with c2:
+        yrs = list(range(1,years+1))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=yrs,y=[net_annual*y for y in yrs],name="Gross Net",line=dict(color="#00d2ff",width=2)))
+        fig.add_trace(go.Scatter(x=yrs,y=[net_annual*y/risk_mult for y in yrs],name="Risk-Adj",line=dict(color="#ff00c1",width=2,dash="dash")))
+        fig.add_trace(go.Scatter(x=yrs,y=[-fleet_size*800000+net_annual*y for y in yrs],name="Payback",line=dict(color="#00ff9f",width=2,dash="dot")))
+        fig.add_hline(y=0, line_color="rgba(255,255,255,0.2)")
+        AegisUI.dark_fig(fig,"ROI PROJECTION")
+        st.plotly_chart(fig, use_container_width=True)
+    m1,m2,m3,m4 = st.columns(4)
+    AegisUI.metric_card(m1,"ANNUAL SAVINGS",f"${annual_saving:,.0f}","",True)
+    AegisUI.metric_card(m2,"OPS COST",f"${annual_cost:,.0f}","",False)
+    AegisUI.metric_card(m3,"NET ANNUAL",f"${net_annual:,.0f}","",net_annual>0)
+    AegisUI.metric_card(m4,"ROI %",f"{roi_pct:.2f}%","",roi_pct>0)
+    st.markdown("<br>",unsafe_allow_html=True)
+    st.markdown("#### RISK EXPOSURE HEATMAP")
+    risk_cats = ["Battery Degrad.","Grid Depend.","Regulatory","Cyber Attack","Supply Chain","Driver Beh.","Market Vol."]
+    scenarios = ["Base","Optimistic","Pessimistic","Stress Test","Black Swan"]
+    fig_h = px.imshow(np.array([[random.uniform(0.1,1.0)*risk_mult for _ in range(7)] for _ in range(5)]),
+                      x=risk_cats, y=scenarios,
+                      color_continuous_scale=["#00d2ff","#ffdd57","#ff00c1"],
+                      aspect="auto", title="RISK MATRIX")
+    AegisUI.dark_fig(fig_h)
+    st.plotly_chart(fig_h, use_container_width=True)
+
+
+def terminal_cyber_shield():
+    AegisUI.header("🛡️ CYBER-SHIELD","ZERO-TRUST BLOCKCHAIN PERIMETER")
+    c1,c2,c3,c4 = st.columns(4)
+    AegisUI.metric_card(c1,"THREATS BLOCKED",str(random.randint(320,850)),"▲ today",False)
+    AegisUI.metric_card(c2,"NODES VALIDATED",str(random.randint(12,20)),"blockchain",True)
+    AegisUI.metric_card(c3,"FIREWALL",f"{random.randint(95,100)}%","integrity",True)
+    AegisUI.metric_card(c4,"ENCRYPTION","AES-256","active",True)
+    st.markdown("<br>",unsafe_allow_html=True)
+    col_log,col_stats = st.columns([3,2])
+    cyber_df = AegisData.cyber_events(20)
+    def cs(val):
+        return f"color:{'#a0b0d0' if val=='LOW' else '#ffdd57' if val=='MED' else '#ff8800' if val=='HIGH' else '#ff00c1'};font-weight:bold"
+    with col_log:
+        st.markdown("#### 🔴 LIVE INTRUSION LOG")
+        st.dataframe(cyber_df.style.applymap(cs,subset=["severity"]),
+                     use_container_width=True,height=320)
+    with col_stats:
+        ev = cyber_df.event.value_counts().reset_index(); ev.columns=["event","count"]
+        fig_ev = px.bar(ev,x="count",y="event",orientation="h",color="count",
+                        color_continuous_scale=["#00d2ff","#ff00c1"],title="ATTACK VECTORS")
+        AegisUI.dark_fig(fig_ev)
+        st.plotly_chart(fig_ev,use_container_width=True)
+    st.markdown("#### ⛓️ BLOCKCHAIN NODES")
+    nodes = [f"NODE-{chr(65+i)}" for i in range(8)]
+    st.dataframe(pd.DataFrame({
+        "node":nodes,
+        "hash":[hashlib.sha256(n.encode()).hexdigest()[:20] for n in nodes],
+        "latency_ms":[random.randint(2,45) for _ in nodes],
+        "status":[random.choice(["VALID","VALID","VALID","SYNCING"]) for _ in nodes],
+        "block_height":[random.randint(98000,100000) for _ in nodes],
+    }),use_container_width=True)
+    st.markdown("#### FIREWALL LAYERS")
+    for lyr in ["L1 Physical","L2 DataLink","L3 Network","L4 Transport","L7 Application"]:
+        st.markdown(f"`{lyr}`")
+        st.progress(random.randint(87,100)/100)
+
+
+def terminal_energy_telemetry():
+    AegisUI.header("⚡ ENERGY TELEMETRY","SMART GRID POWER DISTRIBUTION")
+    ed = AegisData.energy_data()
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=ed.hour,y=ed.grid_kw, name="Grid kW", marker_color="#00d2ff"))
+    fig.add_trace(go.Bar(x=ed.hour,y=ed.solar_kw,name="Solar kW",marker_color="#00ff9f"))
+    fig.add_trace(go.Bar(x=ed.hour,y=ed.regen_kw,name="Regen kW",marker_color="#ff00c1"))
+    fig.add_trace(go.Scatter(x=ed.hour,y=ed.demand_kw,name="Demand",line=dict(color="#ffdd57",width=2)))
+    fig.update_layout(barmode="stack")
+    AegisUI.dark_fig(fig,"24H POWER DISTRIBUTION — kW")
+    fig.update_layout(height=380)
+    st.plotly_chart(fig,use_container_width=True)
+    c1,c2 = st.columns(2)
+    mix = pd.DataFrame({"source":["Grid","Solar","Regen"],"kwh":[ed.grid_kw.sum(),ed.solar_kw.sum(),ed.regen_kw.sum()]})
+    fm = px.pie(mix,names="source",values="kwh",hole=0.5,color_discrete_sequence=["#00d2ff","#00ff9f","#ff00c1"],title="ENERGY MIX")
+    AegisUI.dark_fig(fm)
+    c1.plotly_chart(fm,use_container_width=True)
+    eff = random.uniform(78,95)
+    fg = go.Figure(go.Indicator(
+        mode="gauge+number+delta",value=eff,delta={"reference":80},
+        gauge={"axis":{"range":[0,100]},"bar":{"color":"#00d2ff"},
+               "steps":[{"range":[0,50],"color":"rgba(255,0,193,0.15)"},
+                        {"range":[50,75],"color":"rgba(255,221,87,0.12)"},
+                        {"range":[75,100],"color":"rgba(0,255,159,0.12)"}],
+               "threshold":{"value":80,"line":{"color":"#ff00c1","width":2}}},
+        title={"text":"GRID EFFICIENCY %","font":{"color":"#00d2ff","size":13}},
+        number={"font":{"color":"#00d2ff"}},
+    ))
+    AegisUI.dark_fig(fg)
+    fg.update_layout(height=320)
+    c2.plotly_chart(fg,use_container_width=True)
+
+
+def terminal_digital_twin():
+    AegisUI.header("🔮 DIGITAL TWIN","3D PHYSICS ENGINE — EV REPLICA")
+    st.info("Full 3D physics rendering requires NVIDIA Omniverse / Unity WebGL context. "
+            "Showing live parameter telemetry feed.")
+    vehicle = st.selectbox("Select twin vehicle:", AegisData.VEHICLE_IDS)
+    random.seed(hash(vehicle)%9999)
+    params = {"Motor RPM":random.randint(0,8500),"Torque Nm":round(random.uniform(0,400),1),
+              "Slip Ratio":round(random.uniform(0,0.15),3),"Yaw Rate °/s":round(random.uniform(-30,30),2),
+              "Susp FL mm":round(random.uniform(80,120),1),"Susp FR mm":round(random.uniform(80,120),1),
+              "Susp RL mm":round(random.uniform(80,120),1),"Susp RR mm":round(random.uniform(80,120),1),
+              "Aero Drag N":round(random.uniform(50,400),1),"Roll Resist N":round(random.uniform(20,150),1)}
+    cols = st.columns(5)
+    for i,(k,v) in enumerate(params.items()):
+        cols[i%5].metric(k,v)
+    cats  = ["Battery","Motor","Brakes","Suspension","Thermal","Aero","Electrical"]
+    vals  = [random.randint(60,100) for _ in cats]
+    fr    = go.Figure(go.Scatterpolar(r=vals+[vals[0]],theta=cats+[cats[0]],
+                                      fill="toself",line_color="#00d2ff",
+                                      fillcolor="rgba(0,210,255,0.12)",name="Health"))
+    fr.update_layout(polar=dict(bgcolor="rgba(0,0,0,0)",
+                                radialaxis=dict(visible=True,range=[0,100],gridcolor="rgba(0,210,255,0.15)",color="#00d2ff"),
+                                angularaxis=dict(gridcolor="rgba(0,210,255,0.15)",color="#a0b0d0")))
+    AegisUI.dark_fig(fr,f"TWIN HEALTH RADAR — {vehicle}")
+    st.plotly_chart(fr,use_container_width=True)
+
+
+def terminal_ota():
+    AegisUI.header("🚀 OTA DEPLOYMENT","OVER-THE-AIR KERNEL & FIRMWARE MATRIX")
+    for pkg in AegisData.ota_packages():
+        sc = {"COMPLETE":"#00ff9f","DEPLOYING":"#00d2ff","QUEUED":"#a0b0d0"}.get(pkg["status"],"#fff")
+        st.markdown(f"""<div class="metric-card" style="margin-bottom:.7rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div><span style="color:#00d2ff;font-family:Syncopate,sans-serif;font-size:.85rem;letter-spacing:2px;">{pkg['name']}</span>
+                <span style="color:#a0b0d0;font-size:.72rem;margin-left:1rem;">{pkg['size']}</span></div>
+                <span style="color:{sc};font-size:.75rem;letter-spacing:3px;font-family:Syncopate,sans-serif;">{pkg['status']}</span>
+            </div></div>""",unsafe_allow_html=True)
+        st.progress(pkg["progress"]/100,text=f"{pkg['progress']}%")
+        st.markdown("<div style='margin-bottom:.4rem'></div>",unsafe_allow_html=True)
+    c1,c2,c3 = st.columns(3)
+    cov = random.randint(68,95)
+    AegisUI.metric_card(c1,"COVERAGE",f"{cov}%","of fleet",True)
+    AegisUI.metric_card(c2,"PENDING",str(20-int(20*cov/100)),"",False)
+    AegisUI.metric_card(c3,"AVG DEPLOY","4m 32s","▼ 12s faster",True)
+    st.markdown("<br>",unsafe_allow_html=True)
+    hist = pd.DataFrame({"date":pd.date_range(end=datetime.date.today(),periods=14,freq="D"),
+                         "deployed":[random.randint(0,5) for _ in range(14)],
+                         "failed":[random.randint(0,2) for _ in range(14)]})
+    fig = px.bar(hist,x="date",y=["deployed","failed"],barmode="group",title="14-DAY OTA ACTIVITY",
+                 color_discrete_map={"deployed":"#00d2ff","failed":"#ff00c1"})
+    AegisUI.dark_fig(fig)
+    st.plotly_chart(fig,use_container_width=True)
+
+
+def terminal_blackbox():
+    AegisUI.header("📦 BLACKBOX LOGS","IMMUTABLE EVENT RECORDER")
+    logs = AegisData.blackbox_logs(50)
+    f1,f2,f3 = st.columns(3)
+    sf = f1.multiselect("Severity:",logs.severity.unique().tolist(),default=logs.severity.unique().tolist())
+    vf = f2.multiselect("Vehicle:",["ALL"]+AegisData.VEHICLE_IDS,default=["ALL"])
+    ef = f3.multiselect("Error:",["ALL"]+AegisData.ERRORS,default=["ALL"])
+    flt = logs[logs.severity.isin(sf)]
+    if "ALL" not in vf: flt=flt[flt.vehicle.isin(vf)]
+    if "ALL" not in ef: flt=flt[flt.error_code.isin(ef)]
+    def sc2(val):
+        return {"INFO":"color:#a0b0d0","WARN":"color:#ffdd57","ERROR":"color:#ff8800","CRITICAL":"color:#ff00c1"}.get(val,"")
+    st.dataframe(flt.style.applymap(sc2,subset=["severity"]),use_container_width=True,height=380)
+    c1,c2 = st.columns(2)
+    sv = flt.severity.value_counts().reset_index(); sv.columns=["severity","count"]
+    fs = px.bar(sv,x="severity",y="count",color="severity",
+                color_discrete_map={"INFO":"#a0b0d0","WARN":"#ffdd57","ERROR":"#ff8800","CRITICAL":"#ff00c1"},
+                title="SEVERITY BREAKDOWN")
+    AegisUI.dark_fig(fs); c1.plotly_chart(fs,use_container_width=True)
+    rv = flt.ai_resolution.value_counts().reset_index(); rv.columns=["resolution","count"]
+    fr = px.pie(rv,names="resolution",values="count",hole=0.5,title="AI RESOLUTION TYPES",
+                color_discrete_sequence=px.colors.qualitative.Bold)
+    AegisUI.dark_fig(fr); c2.plotly_chart(fr,use_container_width=True)
+
+
+def terminal_neural_core():
+    """
+    Neural Core terminal.
+    PyTorch is NOT imported at module level (it's 700 MB+).
+    Architecture is shown as a runnable code block.
+    Training metrics are simulated with NumPy — no torch required to run this app.
+    """
+    AegisUI.header("🧠 NEURAL CORE","DEEP LEARNING TOPOLOGY & TRAINING METRICS")
+
+    # Attempt local import — does NOT crash if torch absent
+    TORCH_OK = False
+    try:
+        import torch          # noqa: F401
+        import torch.nn as nn # noqa: F401
+        TORCH_OK = True
+    except ImportError:
+        pass
+
+    tab1, tab2, tab3 = st.tabs(["🏗️ Architecture","📈 Training","🔬 Inference"])
+
+    with tab1:
+        st.markdown("#### AEGIS-NET v3.2 — Transformer-GNN Hybrid")
+        if TORCH_OK:
+            st.success("✅ PyTorch detected — model is runnable on this machine.")
+        else:
+            st.info("ℹ️  PyTorch not installed. Code below is reference only.\n\n"
+                    "Install: `pip install torch`")
+
+        st.dataframe(pd.DataFrame({
+            "Layer":      ["Input","Embedding","Transformer×6","GNN","Attn Pool","Dense(512)","Dense(128)","Output"],
+            "Shape":      ["(B,T,F)","(B,T,256)","(B,T,256)","(B,N,256)","(B,256)","(B,512)","(B,128)","(B,C)"],
+            "Params":     ["—","1.3M","24.6M","8.2M","0.5M","131k","65k","16k"],
+            "Activation": ["—","—","GELU","ReLU","Softmax","GELU","ReLU","Sigmoid"],
+        }), use_container_width=True)
+
+        # Pure display code block — no live import, will never raise ImportError
+        st.code(
+"""\
+# ── AEGIS-NET v3.2 ── requires: pip install torch ────────────────
+import torch
+import torch.nn as nn
+
+class AegisNet(nn.Module):
+    def __init__(self, input_dim=128, hidden=256,
+                 heads=8, layers=6, num_classes=10):
+        super().__init__()
+        self.embed = nn.Linear(input_dim, hidden)
+        enc_layer  = nn.TransformerEncoderLayer(
+            d_model=hidden, nhead=heads,
+            dim_feedforward=1024,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=layers)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.head = nn.Sequential(
+            nn.Linear(hidden, 512), nn.GELU(), nn.Dropout(0.3),
+            nn.Linear(512, 128),   nn.ReLU(),
+            nn.Linear(128, num_classes), nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        # x: (batch, seq_len, input_dim)
+        x = self.embed(x)                           # (B, T, 256)
+        x = self.transformer(x)                     # (B, T, 256)
+        x = self.pool(x.permute(0, 2, 1)).squeeze(-1)  # (B, 256)
+        return self.head(x)                         # (B, num_classes)
+
+# ── Sanity check ─────────────────────────────────────────────────
+if __name__ == "__main__":
+    model  = AegisNet()
+    dummy  = torch.randn(4, 32, 128)   # batch=4, seq=32, features=128
+    output = model(dummy)
+    print("Output shape:", output.shape)  # -> torch.Size([4, 10])
+""",
+            language="python",
+        )
+
+    with tab2:
+        rng    = np.random.default_rng(7)
+        epochs = list(range(1, 51))
+        t_loss = [max(0.001, 1.8*np.exp(-0.07*e) + rng.uniform(-0.02, 0.02)) for e in epochs]
+        v_loss = [max(0.001, 2.0*np.exp(-0.065*e)+ rng.uniform(-0.03, 0.04)) for e in epochs]
+        t_acc  = [min(99, max(0, 100*(1-np.exp(-0.09*e))  + rng.uniform(-1,   1))) for e in epochs]
+        v_acc  = [min(98, max(0, 100*(1-np.exp(-0.082*e)) + rng.uniform(-1.5, 1.5))) for e in epochs]
+
+        fig = make_subplots(rows=1, cols=2, subplot_titles=("LOSS","ACCURACY (%)"))
+        fig.add_trace(go.Scatter(x=epochs,y=t_loss,name="Train Loss",line=dict(color="#00d2ff")),row=1,col=1)
+        fig.add_trace(go.Scatter(x=epochs,y=v_loss,name="Val Loss",  line=dict(color="#ff00c1",dash="dash")),row=1,col=1)
+        fig.add_trace(go.Scatter(x=epochs,y=t_acc, name="Train Acc", line=dict(color="#00ff9f")),row=1,col=2)
+        fig.add_trace(go.Scatter(x=epochs,y=v_acc, name="Val Acc",   line=dict(color="#ffdd57",dash="dash")),row=1,col=2)
+        AegisUI.dark_fig(fig,"TRAINING CURVES — SIMULATED")
+        fig.update_layout(height=370)
+        st.plotly_chart(fig,use_container_width=True)
+        m1,m2,m3,m4 = st.columns(4)
+        AegisUI.metric_card(m1,"BEST VAL ACC",f"{max(v_acc):.1f}%",f"epoch {v_acc.index(max(v_acc))+1}",True)
+        AegisUI.metric_card(m2,"TRAIN LOSS",  f"{t_loss[-1]:.4f}","",True)
+        AegisUI.metric_card(m3,"TOTAL PARAMS","34.8M","",True)
+        AegisUI.metric_card(m4,"INFERENCE",   "12ms","A100",True)
+
+    with tab3:
+        st.markdown("#### REAL-TIME INFERENCE FEED")
+        vehs = AegisData.VEHICLE_IDS[:8]
+        st.dataframe(pd.DataFrame({
+            "vehicle":       vehs,
+            "fault_class":   [random.choice(["NORMAL","BATTERY_DRIFT","MOTOR_STRESS","THERMAL_EVENT"]) for _ in vehs],
+            "confidence":    [round(random.uniform(0.75,0.99),4) for _ in vehs],
+            "latency_ms":    [random.randint(8,22) for _ in vehs],
+            "anomaly_score": [round(random.uniform(0,1),4) for _ in vehs],
+        }), use_container_width=True)
+        fh = px.histogram(pd.DataFrame({"confidence":[round(random.uniform(0.75,0.99),4) for _ in range(40)]}),
+                          x="confidence",nbins=12,title="INFERENCE CONFIDENCE DISTRIBUTION",
+                          color_discrete_sequence=["#00d2ff"])
+        AegisUI.dark_fig(fh)
+        st.plotly_chart(fh,use_container_width=True)
+
+
+def terminal_alpr():
+    AegisUI.header("🚔 ALPR POLICE DB","AUTOMATED LICENSE PLATE RECOGNITION — LAW ENFORCEMENT UPLINK")
+    st.markdown("""<div style="background:rgba(255,0,193,0.06);border:1px solid rgba(255,0,193,0.3);
+         border-radius:8px;padding:.8rem 1.2rem;margin-bottom:1rem;">
+        <span style="color:#ff00c1;font-family:Syncopate,sans-serif;font-size:.75rem;
+                     letter-spacing:3px;">⚠ RESTRICTED ACCESS — AUTHORISED PERSONNEL ONLY</span>
+    </div>""",unsafe_allow_html=True)
+    plate_in = st.text_input("🔍 Enter Vehicle Registration Number:",
+                              placeholder="e.g. TN01AB1234",max_chars=12)
+    if st.button("🔗 INITIATE DB HANDSHAKE") and plate_in.strip():
+        with st.spinner("Connecting to National Vehicle Registry…"):
+            time.sleep(1.2)
+        rec = AegisData.alpr_lookup(plate_in.strip())
+        fs  = {"CLEAR":("✅ CLEAR","#00ff9f","rgba(0,255,159,0.08)"),
+               "WARNING":("⚠️ WARNING","#ffdd57","rgba(255,221,87,0.1)"),
+               "CRITICAL":("🚨 CRITICAL","#ff00c1","rgba(255,0,193,0.1)")}[rec["flag"]]
+        st.markdown(f"""<div style="background:{fs[2]};border:1px solid {fs[1]};
+             border-radius:10px;padding:1.2rem 1.6rem;margin-bottom:1rem;">
+            <div style="font-family:Syncopate,sans-serif;font-size:1.3rem;
+                        color:{fs[1]};letter-spacing:3px;">{fs[0]}</div>
+            <div style="color:#ccc;margin-top:.3rem;">{rec['flag_detail']}</div>
+        </div>""",unsafe_allow_html=True)
+        c1,c2 = st.columns(2)
+        c1.markdown("#### VEHICLE RECORD")
+        c1.table(pd.DataFrame({"Field":["Plate","Owner","Chassis No.","Insurer","Policy Valid Until","RTO"],
+                                "Value":[rec["plate"],rec["owner"],rec["chassis"],rec["insurer"],rec["valid_until"],rec["rto"]]}))
+        c2.markdown("#### FORENSIC METADATA")
+        meta={"Query Time":datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "DB Node":f"NVR-{random.choice(['MUM','DEL','CHN','BLR'])}",
+              "Ping ms":random.randint(12,80),"TLS Cipher":"TLS_AES_256_GCM_SHA384",
+              "Response Hash":hashlib.sha256(rec["chassis"].encode()).hexdigest()[:32],"Encryption":"AES-256-GCM"}
+        c2.table(pd.DataFrame({"Key":list(meta.keys()),"Value":list(meta.values())}))
+        log_html = '<div class="log-block">'
+        log_html += AegisUI.log_line(f"ALPR query — plate: {rec['plate']}")
+        log_html += AegisUI.log_line("Secure channel OK — NVR handshake complete")
+        log_html += AegisUI.log_line(f"Owner: {rec['owner']} | RTO: {rec['rto']}")
+        log_html += AegisUI.log_line(f"Insurer: {rec['insurer']} valid until {rec['valid_until']}")
+        log_html += AegisUI.log_line(f"FLAG: {rec['flag']} — {rec['flag_detail']}",
+                                     {"CLEAR":"info","WARNING":"warn","CRITICAL":"crit"}[rec["flag"]])
+        log_html += AegisUI.log_line("Logged to immutable blockchain ledger.")
+        log_html += '</div>'
+        st.markdown(log_html,unsafe_allow_html=True)
+
+
+# =============================================================================
+#  NEW — MAP ASSISTANT TERMINAL
+# =============================================================================
+def terminal_map_assistant():
+    AegisUI.header("🗺️ MAP ASSISTANT","LIVE VEHICLE TRACKING & ROUTE INTELLIGENCE")
+    df = AegisData.fleet_snapshot()
+
+    c1,c2,c3,c4 = st.columns(4)
+    AegisUI.metric_card(c1,"TRACKED VEHICLES","20","all cities",True)
+    AegisUI.metric_card(c2,"AVG SPEED km/h",f"{df.speed_kmh.mean():.1f}","fleet",True)
+    AegisUI.metric_card(c3,"GEOFENCE ALERTS",str(random.randint(0,3)),"last 30 min",False)
+    AegisUI.metric_card(c4,"COVERAGE km²",str(random.randint(2800,4200)),"active zones",True)
+    st.markdown("<br>",unsafe_allow_html=True)
+
+    tab_fleet, tab_route, tab_heat, tab_geo = st.tabs([
+        "🌍 Fleet Overview","📍 Route Replay","🔥 Density Heatmap","⛔ Geofence Monitor"
+    ])
+
+    cmap = {"ACTIVE":"#00d2ff","IDLE":"#a0b0d0","CHARGING":"#00ff9f","ALERT":"#ff00c1"}
+
+    # ── Fleet Overview ────────────────────────────────────────────────────────
+    with tab_fleet:
+        col_map, col_side = st.columns([3,2])
+        with col_map:
+            f_stat = st.multiselect("Status filter:", df.status.unique().tolist(),
+                                    default=df.status.unique().tolist(), key="ma_stat")
+            f_city = st.multiselect("City filter:",   df.city.unique().tolist(),
+                                    default=df.city.unique().tolist(), key="ma_city")
+            fdf = df[df.status.isin(f_stat) & df.city.isin(f_city)]
+            fig_fm = px.scatter_mapbox(fdf, lat="lat", lon="lon", color="status",
+                                       color_discrete_map=cmap, hover_name="vehicle",
+                                       hover_data={"soc":True,"speed_kmh":True,"temp_c":True,
+                                                   "city":True,"lat":False,"lon":False},
+                                       size="soc", size_max=18, zoom=4,
+                                       center={"lat":20.5,"lon":80}, mapbox_style="carto-darkmatter")
+            AegisUI.dark_fig(fig_fm,"LIVE FLEET POSITIONS")
+            fig_fm.update_layout(height=500, margin=dict(l=0,r=0,t=40,b=0))
+            st.plotly_chart(fig_fm, use_container_width=True)
+
+        with col_side:
+            st.markdown("#### VEHICLE QUICK-LOOK")
+            sel_v = st.selectbox("Select vehicle:", fdf["vehicle"].tolist(), key="ma_vsel")
+            if not fdf.empty:
+                vrow  = fdf[fdf.vehicle==sel_v].iloc[0]
+                sc_c  = cmap.get(vrow["status"],"#fff")
+                st.markdown(f"""
+                <div class="metric-card" style="margin-bottom:1rem;">
+                    <div style="font-family:Syncopate,sans-serif;font-size:1.1rem;
+                                color:#00d2ff;letter-spacing:3px;">{vrow['vehicle']}</div>
+                    <div style="margin-top:.5rem;font-size:.85rem;line-height:1.8;">
+                        <span style="color:{sc_c};">● {vrow['status']}</span><br>
+                        🏙️ {vrow['city']}<br>🔋 SOC: {vrow['soc']}%<br>
+                        🚗 {vrow['speed_kmh']} km/h<br>🌡️ {vrow['temp_c']} °C<br>
+                        📍 {vrow['lat']:.4f}, {vrow['lon']:.4f}
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+                fig_sg = go.Figure(go.Indicator(
+                    mode="gauge+number", value=int(vrow["soc"]),
+                    gauge={"axis":{"range":[0,100]},
+                           "bar":{"color":"#00ff9f" if vrow["soc"]>40 else "#ff00c1"},
+                           "steps":[{"range":[0,20],"color":"rgba(255,0,193,0.2)"},
+                                    {"range":[20,50],"color":"rgba(255,221,87,0.1)"},
+                                    {"range":[50,100],"color":"rgba(0,255,159,0.1)"}],
+                           "threshold":{"value":20,"line":{"color":"#ff00c1","width":2}}},
+                    title={"text":"SOC %","font":{"color":"#00d2ff","size":12}},
+                    number={"font":{"color":"#00d2ff","size":36}},
+                ))
+                AegisUI.dark_fig(fig_sg)
+                fig_sg.update_layout(height=240)
+                st.plotly_chart(fig_sg, use_container_width=True)
+
+            cc = df.city.value_counts().reset_index(); cc.columns=["city","count"]
+            fig_cc = px.bar(cc, x="city", y="count", title="VEHICLES PER CITY",
+                            color="count", color_continuous_scale=["#00d2ff","#ff00c1"])
+            AegisUI.dark_fig(fig_cc)
+            fig_cc.update_layout(height=230, margin=dict(l=20,r=10,t=35,b=60))
+            st.plotly_chart(fig_cc, use_container_width=True)
+
+    # ── Route Replay ──────────────────────────────────────────────────────────
+    with tab_route:
+        st.markdown("#### 📍 GPS ROUTE HISTORY & REPLAY")
+        rv    = st.selectbox("Select vehicle:", AegisData.VEHICLE_IDS, key="ma_rv")
+        rdf   = AegisData.route_history(rv)
+
+        fig_rt = go.Figure()
+        fig_rt.add_trace(go.Scattermapbox(lat=rdf.lat, lon=rdf.lon, mode="lines",
+                                           line=dict(color="#00d2ff",width=3), name="Route"))
+        fig_rt.add_trace(go.Scattermapbox(lat=rdf.lat, lon=rdf.lon, mode="markers+text",
+                                           marker=dict(size=8, color="#ff00c1"),
+                                           text=rdf.timestamp, textposition="top right",
+                                           textfont=dict(size=8, color="#ffdd57"),
+                                           name="Waypoints",
+                                           hovertemplate="<b>%{text}</b><br>Speed:%{customdata[0]}km/h<br>SOC:%{customdata[1]}%<extra></extra>",
+                                           customdata=list(zip(rdf.speed_kmh, rdf["soc_%"]))))
+        fig_rt.add_trace(go.Scattermapbox(lat=[rdf.lat.iloc[0]], lon=[rdf.lon.iloc[0]],
+                                           mode="markers", marker=dict(size=16,color="#00ff9f"), name="Start"))
+        fig_rt.add_trace(go.Scattermapbox(lat=[rdf.lat.iloc[-1]], lon=[rdf.lon.iloc[-1]],
+                                           mode="markers", marker=dict(size=16,color="#ff00c1"), name="End"))
+        fig_rt.update_layout(
+            mapbox=dict(style="carto-darkmatter",
+                        center=dict(lat=rdf.lat.mean(),lon=rdf.lon.mean()),zoom=12),
+            height=480, margin=dict(l=0,r=0,t=0,b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#a0b0d0")),
+        )
+        st.plotly_chart(fig_rt, use_container_width=True)
+
+        c1,c2 = st.columns(2)
+        fs = px.line(rdf, x="timestamp", y="speed_kmh", title=f"SPEED — {rv}",
+                     color_discrete_sequence=["#00d2ff"])
+        AegisUI.dark_fig(fs); fs.update_layout(height=240); c1.plotly_chart(fs,use_container_width=True)
+        fs2= px.line(rdf, x="timestamp", y="soc_%", title=f"SOC — {rv}",
+                     color_discrete_sequence=["#00ff9f"])
+        fs2.add_hline(y=20,line_dash="dash",line_color="#ff00c1",
+                      annotation_text="LOW SOC",annotation_font_color="#ff00c1")
+        AegisUI.dark_fig(fs2); fs2.update_layout(height=240); c2.plotly_chart(fs2,use_container_width=True)
+        st.dataframe(rdf, use_container_width=True, height=200)
+
+    # ── Density Heatmap ───────────────────────────────────────────────────────
+    with tab_heat:
+        st.markdown("#### 🔥 VEHICLE DENSITY HEATMAP")
+        hlat, hlon = [], []
+        for city in AegisData.CITIES:
+            blat, blon = AegisData.CITY_COORDS[city]
+            n = random.randint(30,80)
+            hlat.extend(np.random.normal(blat,0.05,n).tolist())
+            hlon.extend(np.random.normal(blon,0.05,n).tolist())
+        fig_hm = px.density_mapbox(pd.DataFrame({"lat":hlat,"lon":hlon}),
+                                   lat="lat",lon="lon",radius=18,zoom=4,
+                                   center={"lat":20.5,"lon":80},mapbox_style="carto-darkmatter",
+                                   color_continuous_scale=["#050510","#00d2ff","#ff00c1","#ffffff"])
+        AegisUI.dark_fig(fig_hm,"FLEET DENSITY — ALL CITIES")
+        fig_hm.update_layout(height=520, margin=dict(l=0,r=0,t=40,b=0))
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+        ca = pd.DataFrame({"city":AegisData.CITIES,
+                           "vehicles":[random.randint(5,35) for _ in AegisData.CITIES],
+                           "alerts":[random.randint(0,5) for _ in AegisData.CITIES]})
+        fig_ca = px.bar(ca,x="city",y=["vehicles","alerts"],barmode="group",title="CITY ACTIVITY",
+                        color_discrete_map={"vehicles":"#00d2ff","alerts":"#ff00c1"})
+        AegisUI.dark_fig(fig_ca)
+        st.plotly_chart(fig_ca,use_container_width=True)
+
+    # ── Geofence Monitor ──────────────────────────────────────────────────────
+    with tab_geo:
+        st.markdown("#### ⛔ GEOFENCE MONITOR")
+        geofences = [
+            {"name":"DEPOT ALPHA", "city":"Chennai",   "lat":13.0827,"lon":80.2707,"radius_km":5.0, "type":"ALLOWED"},
+            {"name":"DEPOT BETA",  "city":"Mumbai",    "lat":19.0760,"lon":72.8777,"radius_km":4.5, "type":"ALLOWED"},
+            {"name":"ZONE GAMMA",  "city":"Delhi",     "lat":28.6139,"lon":77.2090,"radius_km":6.0, "type":"ALLOWED"},
+            {"name":"RESTRICT-1",  "city":"Bengaluru", "lat":12.9716,"lon":77.5946,"radius_km":2.0, "type":"RESTRICTED"},
+            {"name":"RESTRICT-2",  "city":"Hyderabad", "lat":17.3850,"lon":78.4867,"radius_km":1.5, "type":"RESTRICTED"},
+        ]
+        gf_df = pd.DataFrame(geofences)
+        violations = []
+        for _, veh in df.iterrows():
+            for _, gf in gf_df[gf_df.type=="RESTRICTED"].iterrows():
+                dist = ((veh.lat-gf.lat)**2+(veh.lon-gf.lon)**2)**0.5*111
+                if dist < gf.radius_km:
+                    violations.append({"vehicle":veh.vehicle,"zone":gf["name"],"city":gf.city,
+                                        "distance":f"{dist:.2f}km","soc":veh.soc,"status":"🚨 VIOLATION"})
+        if violations:
+            st.error(f"🚨 {len(violations)} GEOFENCE VIOLATION(S) DETECTED!")
+            st.dataframe(pd.DataFrame(violations),use_container_width=True)
+        else:
+            st.success("✅ No geofence violations. All vehicles within authorised zones.")
+
+        fig_gf = px.scatter_mapbox(df,lat="lat",lon="lon",color="status",
+                                   color_discrete_map=cmap,hover_name="vehicle",
+                                   size="soc",size_max=14,zoom=4,
+                                   center={"lat":20.5,"lon":80},mapbox_style="carto-darkmatter")
+        fig_gf.add_trace(go.Scattermapbox(
+            lat=gf_df.lat,lon=gf_df.lon,mode="markers+text",
+            marker=dict(size=20,color=["#00ff9f" if t=="ALLOWED" else "#ff00c1" for t in gf_df.type],opacity=0.6),
+            text=gf_df["name"],textposition="top right",textfont=dict(size=10,color="#ffdd57"),name="Geofences"))
+        AegisUI.dark_fig(fig_gf,"GEOFENCE ZONES")
+        fig_gf.update_layout(height=460,margin=dict(l=0,r=0,t=40,b=0))
+        st.plotly_chart(fig_gf,use_container_width=True)
+        st.dataframe(gf_df, use_container_width=True)
+
+        st.markdown("#### 📋 GEOFENCE EVENT LOG")
+        log_html = '<div class="log-block">'
+        for _ in range(8):
+            ts  = (datetime.datetime.now()-datetime.timedelta(minutes=random.randint(1,120))).strftime("%H:%M:%S")
+            gf  = random.choice(geofences)
+            evt = random.choice(["ENTERED","EXITED","DWELL","SPEEDING"])
+            lvl = "crit" if gf["type"]=="RESTRICTED" and evt=="ENTERED" else "info"
+            log_html += AegisUI.log_line(
+                f"{random.choice(AegisData.VEHICLE_IDS)} {evt} [{gf['name']}] @ {gf['city']}", lvl)
+        log_html += '</div>'
+        st.markdown(log_html, unsafe_allow_html=True)
+
+
+# =============================================================================
+#  MAIN
+# =============================================================================
+def main():
+    AegisUI.inject_css()
+
+    TERMINALS = [
+        "⚡ Command Overview",
+        "🎙️ Voice Assistant",
+        "✋ Gesture Security",
+        "🔬 Predictive Health",
+        "💹 Financial Risk AI",
+        "🛡️ Cyber-Shield",
+        "⚡ Energy Telemetry",
+        "🔮 Digital Twin",
+        "🚀 OTA Deployment",
+        "📦 BlackBox Logs",
+        "🧠 Neural Core",
+        "🚔 ALPR Police DB",
+        "🗺️ Map Assistant",
+    ]
+
+    with st.sidebar:
+        st.markdown('<div class="sidebar-logo">🛡 AEGIS OS</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:.62rem;letter-spacing:3px;color:rgba(0,210,255,0.4);'
+                    'text-align:center;margin-bottom:1rem;">EV FLEET INTELLIGENCE</div>',
+                    unsafe_allow_html=True)
+        st.markdown("---")
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        st.markdown(f"""<div style="font-size:.72rem;color:#a0b0d0;letter-spacing:2px;padding:.3rem 0;">
+            🟢 SYSTEM ONLINE<br>🔵 {now} IST<br>🟡 20 VEHICLES TRACKED</div>""",
+            unsafe_allow_html=True)
+        st.markdown("---")
+        selected = st.radio("SATELLITE UPLINK", TERMINALS, label_visibility="visible")
+        st.markdown("---")
+        st.markdown('<div style="font-size:.62rem;color:rgba(0,210,255,0.35);letter-spacing:2px;'
+                    'text-align:center;">AEGIS OS v3.3.0<br>© 2025 AEGIS INTELLIGENCE</div>',
+                    unsafe_allow_html=True)
+
+    dispatch = {
+        TERMINALS[0]:  terminal_command_overview,
+        TERMINALS[1]:  AegisHardware.voice_terminal,
+        TERMINALS[2]:  AegisHardware.gesture_terminal,
+        TERMINALS[3]:  terminal_predictive_health,
+        TERMINALS[4]:  terminal_financial_risk,
+        TERMINALS[5]:  terminal_cyber_shield,
+        TERMINALS[6]:  terminal_energy_telemetry,
+        TERMINALS[7]:  terminal_digital_twin,
+        TERMINALS[8]:  terminal_ota,
+        TERMINALS[9]:  terminal_blackbox,
+        TERMINALS[10]: terminal_neural_core,
+        TERMINALS[11]: terminal_alpr,
+        TERMINALS[12]: terminal_map_assistant,
+    }
+    dispatch[selected]()
+
+
+if __name__ == "__main__":
+    main()
