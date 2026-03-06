@@ -7,3 +7,5 @@ mediapipe==0.9.3
 pyttsx3
 SpeechRecognition
 pyaudio
+opencv-python
+scipy	
